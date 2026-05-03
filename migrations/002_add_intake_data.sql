@@ -1,0 +1,2 @@
+ALTER TABLE appointments
+  ADD COLUMN IF NOT EXISTS intake_data JSONB NOT NULL DEFAULT '{}';

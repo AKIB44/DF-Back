@@ -1,0 +1,463 @@
+{
+  "info": {
+    "name": "DentaFlow — MVP API",
+    "_postman_id": "dentaflow-mvp-v1",
+    "description": "Core clinic operations. Import this, set base_url, run Login — token auto-saves.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:3000/v1", "type": "string" },
+    { "key": "token",    "value": "",                          "type": "string" }
+  ],
+  "item": [
+
+    {
+      "name": "🔐  Auth",
+      "item": [
+
+        {
+          "name": "Login",
+          "event": [{
+            "listen": "test",
+            "script": {
+              "type": "text/javascript",
+              "exec": [
+                "const r = pm.response.json();",
+                "if (r.access_token) pm.collectionVariables.set('token', r.access_token);"
+              ]
+            }
+          }],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"admin@sharayudental.com\",\n  \"password\": \"password123\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/auth/login", "host": ["{{base_url}}"], "path": ["auth","login"] },
+            "description": "Returns access_token + refresh_token + user { id, email, first_name, last_name, role, clinic_id }. Token auto-saved to collection variable."
+          }
+        },
+
+        {
+          "name": "Refresh Token",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"refresh_token\": \"<paste refresh token here>\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/auth/refresh", "host": ["{{base_url}}"], "path": ["auth","refresh"] },
+            "description": "Returns new access_token. Call when the current token expires (401 response)."
+          }
+        },
+
+        {
+          "name": "Logout",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "POST",
+            "header": [],
+            "url": { "raw": "{{base_url}}/auth/logout", "host": ["{{base_url}}"], "path": ["auth","logout"] }
+          }
+        }
+
+      ]
+    },
+
+    {
+      "name": "🏥  Clinic Setup",
+      "description": "One-time setup after first login. Configure your clinic before onboarding staff and patients.",
+      "item": [
+
+        {
+          "name": "Get Own Clinic",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/clinic", "host": ["{{base_url}}"], "path": ["clinic"] },
+            "description": "Returns the clinic that belongs to the logged-in admin. Backend uses clinic_id from JWT."
+          }
+        },
+
+        {
+          "name": "Update Clinic Profile",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Sharayu Dental Clinic\",\n  \"phone\": \"9876543210\",\n  \"email\": \"info@sharayudental.com\",\n  \"address\": \"123 Main Street\",\n  \"city\": \"Mumbai\",\n  \"state\": \"Maharashtra\",\n  \"logo_url\": \"https://example.com/logo.png\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/clinic", "host": ["{{base_url}}"], "path": ["clinic"] }
+          }
+        }
+
+      ]
+    },
+
+    {
+      "name": "🪑  Chairs",
+      "description": "Physical treatment chairs in the clinic. Appointments are assigned to a chair.",
+      "item": [
+
+        {
+          "name": "List Chairs",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/chairs", "host": ["{{base_url}}"], "path": ["chairs"] },
+            "description": "Returns all chairs for the logged-in clinic."
+          }
+        },
+
+        {
+          "name": "Add Chair",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Chair 1\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/chairs", "host": ["{{base_url}}"], "path": ["chairs"] }
+          }
+        },
+
+        {
+          "name": "Update Chair",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Chair 1\",\n  \"is_active\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/chairs/:id", "host": ["{{base_url}}"], "path": ["chairs",":id"], "variable": [{ "key": "id", "value": "chair-uuid-here" }] }
+          }
+        },
+
+        {
+          "name": "Delete Chair",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/chairs/:id", "host": ["{{base_url}}"], "path": ["chairs",":id"], "variable": [{ "key": "id", "value": "chair-uuid-here" }] }
+          }
+        }
+
+      ]
+    },
+
+    {
+      "name": "🦷  Services",
+      "description": "Dental procedures offered by the clinic — used for slot availability and appointment booking.",
+      "item": [
+
+        {
+          "name": "List Services",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/services", "host": ["{{base_url}}"], "path": ["services"] }
+          }
+        },
+
+        {
+          "name": "Add Service",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Root Canal\",\n  \"duration_minutes\": 60,\n  \"price\": 3500,\n  \"description\": \"Single sitting RCT\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/services", "host": ["{{base_url}}"], "path": ["services"] }
+          }
+        },
+
+        {
+          "name": "Update Service",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Root Canal\",\n  \"duration_minutes\": 60,\n  \"price\": 4000,\n  \"is_active\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/services/:id", "host": ["{{base_url}}"], "path": ["services",":id"], "variable": [{ "key": "id", "value": "service-uuid-here" }] }
+          }
+        },
+
+        {
+          "name": "Delete Service",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "DELETE",
+            "header": [],
+            "url": { "raw": "{{base_url}}/services/:id", "host": ["{{base_url}}"], "path": ["services",":id"], "variable": [{ "key": "id", "value": "service-uuid-here" }] }
+          }
+        }
+
+      ]
+    },
+
+    {
+      "name": "👥  Staff",
+      "description": "Clinic staff — doctors and receptionists. Roles: clinic_admin | doctor | receptionist.",
+      "item": [
+
+        {
+          "name": "List Staff",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/staff", "host": ["{{base_url}}"], "path": ["staff"] }
+          }
+        },
+
+        {
+          "name": "Add Staff Member",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Dr. Priya\",\n  \"last_name\": \"Sharma\",\n  \"email\": \"priya@sharayudental.com\",\n  \"role\": \"doctor\",\n  \"password\": \"TempPass@123\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/staff", "host": ["{{base_url}}"], "path": ["staff"] },
+            "description": "Creates a login for the staff member. Send password separately through a secure channel. role: clinic_admin | doctor | receptionist"
+          }
+        },
+
+        {
+          "name": "Update Staff Member",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"first_name\": \"Dr. Priya\",\n  \"last_name\": \"Sharma\",\n  \"role\": \"doctor\",\n  \"is_active\": true\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/staff/:id", "host": ["{{base_url}}"], "path": ["staff",":id"], "variable": [{ "key": "id", "value": "user-uuid-here" }] }
+          }
+        },
+
+        {
+          "name": "Deactivate Staff Member",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"is_active\": false\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/staff/:id", "host": ["{{base_url}}"], "path": ["staff",":id"], "variable": [{ "key": "id", "value": "user-uuid-here" }] },
+            "description": "Soft-disable — revokes login access without deleting history."
+          }
+        }
+
+      ]
+    },
+
+    {
+      "name": "🧑  Patients",
+      "description": "Patient registration and lookup. Search by name or phone before creating a new record.",
+      "item": [
+
+        {
+          "name": "Search Patients",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/patients?search=9876543210&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["patients"],
+              "query": [
+                { "key": "search", "value": "9876543210", "description": "phone or name — partial match" },
+                { "key": "limit",  "value": "10" }
+              ]
+            },
+            "description": "Search by phone or name. Always search before registering to avoid duplicates."
+          }
+        },
+
+        {
+          "name": "Register Patient",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Ramesh Patil\",\n  \"phone\": \"9876543210\",\n  \"email\": \"ramesh@example.com\",\n  \"dob\": \"1985-06-15\",\n  \"gender\": \"male\",\n  \"address\": \"456 Park Lane, Mumbai\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/patients", "host": ["{{base_url}}"], "path": ["patients"] },
+            "description": "Only name + phone are required. The rest is optional but useful."
+          }
+        },
+
+        {
+          "name": "Get Patient",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/patients/:id", "host": ["{{base_url}}"], "path": ["patients",":id"], "variable": [{ "key": "id", "value": "patient-uuid-here" }] },
+            "description": "Returns patient details + recent appointments."
+          }
+        },
+
+        {
+          "name": "Update Patient",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "PUT",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Ramesh Patil\",\n  \"phone\": \"9876543210\",\n  \"email\": \"ramesh.new@example.com\",\n  \"address\": \"789 New Colony, Mumbai\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/patients/:id", "host": ["{{base_url}}"], "path": ["patients",":id"], "variable": [{ "key": "id", "value": "patient-uuid-here" }] }
+          }
+        }
+
+      ]
+    },
+
+    {
+      "name": "📅  Appointments",
+      "description": "The core daily workflow. Check slots → book → track status through the day.",
+      "item": [
+
+        {
+          "name": "Get Available Slots",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/appointments/slots?date=2026-05-02&service_id=SVC-03&chair_id=1",
+              "host": ["{{base_url}}"],
+              "path": ["appointments","slots"],
+              "query": [
+                { "key": "date",       "value": "2026-05-02",  "description": "YYYY-MM-DD" },
+                { "key": "service_id", "value": "SVC-03",      "description": "determines slot duration" },
+                { "key": "chair_id",   "value": "1",           "description": "which chair to check" }
+              ]
+            },
+            "description": "Returns time slots for a given date + service + chair. Taken slots are flagged. Use this to show the booking grid."
+          }
+        },
+
+        {
+          "name": "Get Day Schedule",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/appointments?date=2026-05-02&limit=100",
+              "host": ["{{base_url}}"],
+              "path": ["appointments"],
+              "query": [
+                { "key": "date",     "value": "2026-05-02" },
+                { "key": "limit",    "value": "100" },
+                { "key": "chair_id", "value": "",  "description": "optional filter" },
+                { "key": "status",   "value": "",  "description": "optional filter: booked|confirmed|in_progress|done|no_show|cancelled" }
+              ]
+            },
+            "description": "Powers the kanban schedule board. Returns all appointments for a date, sorted by time."
+          }
+        },
+
+        {
+          "name": "Book Appointment  [PUBLIC]",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"service_id\": \"SVC-03\",\n  \"chair_id\": 1,\n  \"scheduled_at\": \"2026-05-02T10:00:00+05:30\",\n  \"booking_source\": \"website\",\n  \"notes\": \"Severe toothache, left lower molar\",\n  \"patient\": {\n    \"name\": \"Sunita Desai\",\n    \"phone\": \"9123456789\",\n    \"email\": \"sunita@example.com\"\n  }\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/appointments", "host": ["{{base_url}}"], "path": ["appointments"] },
+            "description": "No auth required — this is the public patient-facing booking endpoint. Backend creates or looks up the patient by phone. booking_source: website | whatsapp | direct | staff"
+          }
+        },
+
+        {
+          "name": "Get Appointment Detail",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/appointments/:id", "host": ["{{base_url}}"], "path": ["appointments",":id"], "variable": [{ "key": "id", "value": "appt-uuid-here" }] }
+          }
+        },
+
+        {
+          "name": "Update Appointment Status",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"confirmed\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/appointments/:id/status", "host": ["{{base_url}}"], "path": ["appointments",":id","status"], "variable": [{ "key": "id", "value": "appt-uuid-here" }] },
+            "description": "Single endpoint for all status transitions:\n  booked → confirmed     (receptionist confirms)\n  confirmed → in_progress  (doctor starts treatment)\n  in_progress → done       (treatment complete)\n  any → no_show           (patient didn't come)\n  any → cancelled          (cancelled by clinic or patient)\n\nBackend validates allowed transitions."
+          }
+        },
+
+        {
+          "name": "Reschedule Appointment",
+          "request": {
+            "auth": { "type": "bearer", "bearer": [{ "key": "token", "value": "{{token}}" }] },
+            "method": "PATCH",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"scheduled_at\": \"2026-05-03T14:00:00+05:30\",\n  \"chair_id\": 2,\n  \"notes\": \"Patient requested change\"\n}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "url": { "raw": "{{base_url}}/appointments/:id", "host": ["{{base_url}}"], "path": ["appointments",":id"], "variable": [{ "key": "id", "value": "appt-uuid-here" }] },
+            "description": "Change time or chair. Only allowed if status is booked or confirmed."
+          }
+        }
+
+      ]
+    }
+
+  ]
+}
