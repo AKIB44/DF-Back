@@ -41,7 +41,7 @@ function signTokens(user) {
   const payload = { sub: user.id, clinic_id: user.clinic_id, role: user.role };
 
   const access_token = jwt.sign(payload, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || '15m',
+    expiresIn: process.env.JWT_EXPIRES_IN || '8h',
   });
 
   const refresh_token = jwt.sign(payload, process.env.REFRESH_SECRET, {

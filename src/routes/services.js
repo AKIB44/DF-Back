@@ -4,6 +4,7 @@ const db       = require('../db');
 const authenticate = require('../middleware/authenticate');
 const authorize    = require('../middleware/authorize');
 const validate     = require('../middleware/validate');
+const { resolveClinicIdForOptionalAuth } = require('../helpers/public-clinic');
 
 const router = express.Router();
 
@@ -18,13 +19,15 @@ const updateSchema = createSchema.keys({
   is_active: Joi.boolean().optional(),
 });
 
-router.use(authenticate);
-
 router.get('/', async (req, res, next) => {
   try {
+    const clinicId = resolveClinicIdForOptionalAuth(req);
+    if (!clinicId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     const result = await db.query(
       `SELECT * FROM services WHERE clinic_id = $1 ORDER BY name ASC`,
-      [req.user.clinic_id]
+      [clinicId]
     );
     res.json({ services: result.rows });
   } catch (err) {
@@ -32,7 +35,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.post('/', authorize('admin'), validate(createSchema), async (req, res, next) => {
+router.post('/', authenticate, authorize('admin'), validate(createSchema), async (req, res, next) => {
   try {
     const { name, duration_minutes, price, description } = req.body;
     const result = await db.query(
@@ -46,7 +49,7 @@ router.post('/', authorize('admin'), validate(createSchema), async (req, res, ne
   }
 });
 
-router.put('/:id', authorize('admin'), validate(updateSchema), async (req, res, next) => {
+router.put('/:id', authenticate, authorize('admin'), validate(updateSchema), async (req, res, next) => {
   try {
     const { name, duration_minutes, price, description, is_active } = req.body;
     const result = await db.query(
@@ -61,7 +64,7 @@ router.put('/:id', authorize('admin'), validate(updateSchema), async (req, res, 
   }
 });
 
-router.delete('/:id', authorize('admin'), async (req, res, next) => {
+router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
   try {
     const conflict = await db.query(
       `SELECT id FROM appointments

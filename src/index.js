@@ -8,6 +8,7 @@ app.use(cors());
 app.use(express.json());
 app.use(logger);
 
+
 app.use('/v1/auth',         require('./routes/auth'));
 app.use('/v1/clinic',       require('./routes/clinic'));
 app.use('/v1/chairs',       require('./routes/chairs'));

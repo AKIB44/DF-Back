@@ -4,6 +4,7 @@ const db       = require('../db');
 const authenticate = require('../middleware/authenticate');
 const authorize    = require('../middleware/authorize');
 const validate     = require('../middleware/validate');
+const { resolveClinicIdForOptionalAuth } = require('../helpers/public-clinic');
 
 const router = express.Router();
 
@@ -16,13 +17,15 @@ const updateSchema = Joi.object({
   is_active: Joi.boolean().optional(),
 });
 
-router.use(authenticate);
-
 router.get('/', async (req, res, next) => {
   try {
+    const clinicId = resolveClinicIdForOptionalAuth(req);
+    if (!clinicId) {
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
     const result = await db.query(
       `SELECT * FROM chairs WHERE clinic_id = $1 ORDER BY created_at ASC`,
-      [req.user.clinic_id]
+      [clinicId]
     );
     res.json({ chairs: result.rows });
   } catch (err) {
@@ -30,7 +33,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.post('/', authorize('admin'), validate(createSchema), async (req, res, next) => {
+router.post('/', authenticate, authorize('admin'), validate(createSchema), async (req, res, next) => {
   try {
     const result = await db.query(
       `INSERT INTO chairs (clinic_id, name) VALUES ($1, $2) RETURNING *`,
@@ -42,7 +45,7 @@ router.post('/', authorize('admin'), validate(createSchema), async (req, res, ne
   }
 });
 
-router.put('/:id', authorize('admin'), validate(updateSchema), async (req, res, next) => {
+router.put('/:id', authenticate, authorize('admin'), validate(updateSchema), async (req, res, next) => {
   try {
     const { name, is_active } = req.body;
     const result = await db.query(
@@ -56,7 +59,7 @@ router.put('/:id', authorize('admin'), validate(updateSchema), async (req, res, 
   }
 });
 
-router.delete('/:id', authorize('admin'), async (req, res, next) => {
+router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
   try {
     const conflict = await db.query(
       `SELECT id FROM appointments
