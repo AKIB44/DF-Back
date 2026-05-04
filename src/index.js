@@ -16,6 +16,7 @@ app.use('/v1/services',     require('./routes/services'));
 app.use('/v1/staff',        require('./routes/staff'));
 app.use('/v1/patients',     require('./routes/patients'));
 app.use('/v1/appointments', require('./routes/appointments'));
+app.use('/v1/rx',           require('./routes/rx'));
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 

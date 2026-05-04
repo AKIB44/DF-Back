@@ -3,6 +3,12 @@ const { pool } = require('../src/db');
 
 /** Tables from migrations/001_init.sql — only existing ones are truncated */
 const DENTAFLOW_TABLES = [
+  'rx_line_items',
+  'prescriptions',
+  'rx_service_defaults',
+  'rx_procedures',
+  'rx_medicines',
+  'rx_sequence',
   'refresh_tokens',
   'appointments',
   'patients',
