@@ -1,217 +1,327 @@
+'use strict';
+
 const PDFDocument = require('pdfkit');
+const QRCode      = require('qrcode');
 
-const LOGO_FETCH_TIMEOUT_MS = 5000;
-const MAX_LOGO_BYTES = 2 * 1024 * 1024;
+// ─── Colour palette ───────────────────────────────────────────────────────────
+const C = {
+  TEAL:      '#0D7A5F',
+  TEAL_DARK: '#095C47',
+  NAVY:      '#0F172A',
+  GRAY:      '#64748B',
+  LIGHT:     '#E2E8F0',
+  WHITE:     '#FFFFFF',
+  MUTED:     '#94A3B8',
+};
 
-function line(doc, y) {
-  doc
-    .moveTo(50, y)
-    .lineTo(545, y)
-    .strokeColor('#D1D5DB')
-    .stroke();
+// ─── Layout constants (A4 = 595 × 842 pt, margin 45) ─────────────────────────
+const PAGE_W  = 595;
+const PAGE_H  = 842;
+const MARGIN  = 45;
+const CONTENT_W = PAGE_W - MARGIN * 2;   // 505 pt
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function hline(doc, y, color = C.LIGHT, width = 0.5) {
+  doc.save()
+     .moveTo(MARGIN, y).lineTo(PAGE_W - MARGIN, y)
+     .strokeColor(color).lineWidth(width).stroke()
+     .restore();
 }
 
-function writeField(doc, label, value, x, y) {
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(9)
-    .fillColor('#374151')
-    .text(label, x, y, { continued: true })
-    .font('Helvetica')
-    .fillColor('#111827')
-    .text(` ${value || '-'}`);
+function fmtDate(dt) {
+  if (!dt) return '-';
+  return new Intl.DateTimeFormat('en-IN', { day: '2-digit', month: 'short', year: 'numeric' })
+    .format(new Date(dt));
 }
 
-function formatDate(date) {
-  if (!date) return '-';
-  return new Intl.DateTimeFormat('en-IN', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-  }).format(new Date(date));
+function fmtTime(dt) {
+  if (!dt) return '-';
+  return new Intl.DateTimeFormat('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })
+    .format(new Date(dt));
 }
 
-function itemTitle(item) {
-  if (item.item_type === 'medicine') {
-    const parts = [item.medicine_name, item.medicine_strength].filter(Boolean);
-    return parts.join(' ');
-  }
-  return item.procedure_name || item.procedure_code || 'Procedure';
+function medTitle(item)  { return [item.medicine_name, item.medicine_strength].filter(Boolean).join(' '); }
+function procTitle(item) { return item.procedure_name || item.procedure_code || 'Procedure'; }
+
+function medDetail(item) {
+  return [item.dosage, item.frequency, item.duration,
+          item.quantity ? `Qty: ${item.quantity}` : null,
+          item.instructions]
+    .filter(Boolean).join('  ·  ');
 }
 
-function itemDetails(item) {
-  if (item.item_type === 'procedure') {
-    return [
-      item.procedure_status ? `Status: ${item.procedure_status}` : null,
-      item.instructions || item.default_notes,
-    ].filter(Boolean).join(' | ');
-  }
-
-  return [
-    item.dosage,
-    item.frequency,
-    item.duration,
-    item.quantity ? `Qty: ${item.quantity}` : null,
-    item.instructions,
-  ].filter(Boolean).join(' | ');
+function procDetail(item) {
+  const status = item.procedure_status
+    ? { planned: '○ Planned', done: '✓ Done', skipped: '— Skipped' }[item.procedure_status] || ''
+    : '';
+  return [status, item.instructions || item.default_notes].filter(Boolean).join('  ·  ');
 }
 
-async function fetchLogoBuffer(logoUrl) {
-  if (!logoUrl) return null;
-
+async function buildQrBuffer(text) {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), LOGO_FETCH_TIMEOUT_MS);
-    try {
-      const response = await fetch(logoUrl, { signal: controller.signal });
-
-      if (!response.ok) return null;
-
-      const contentType = response.headers.get('content-type') || '';
-      if (contentType.includes('svg')) return null;
-
-      const contentLength = Number(response.headers.get('content-length') || 0);
-      if (contentLength > MAX_LOGO_BYTES) return null;
-
-      const arrayBuffer = await response.arrayBuffer();
-      if (arrayBuffer.byteLength > MAX_LOGO_BYTES) return null;
-
-      return Buffer.from(arrayBuffer);
-    } finally {
-      clearTimeout(timeout);
-    }
-  } catch (_) {
-    return null;
-  }
+    return await QRCode.toBuffer(text || '-', {
+      type:          'png',
+      width:         140,
+      margin:        1,
+      color:         { dark: C.NAVY, light: '#FFFFFF00' },
+    });
+  } catch { return null; }
 }
 
-function renderHeader(doc, rx, logoBuffer) {
-  const headerTop = 50;
+// ─── Section renderers ────────────────────────────────────────────────────────
 
+async function renderHeader(doc, rx, logoBuffer, qrBuffer) {
+  const TOP   = 45;
+  const BOX_H = 80;   // height reserved for logo / QR
+  const MID_X = MARGIN + BOX_H + 8;       // text start after logo
+  const MID_W = CONTENT_W - BOX_H * 2 - 16; // text width (centre block)
+
+  // ── Logo top-left ──
   if (logoBuffer) {
     try {
-      doc.image(logoBuffer, 50, headerTop, {
-        fit: [72, 72],
-        align: 'center',
-        valign: 'center',
-      });
-    } catch (_) {
-      logoBuffer = null;
-    }
+      doc.image(logoBuffer, MARGIN, TOP, { fit: [BOX_H, BOX_H], align: 'center', valign: 'center' });
+    } catch (_) { /* silently skip broken image */ }
   }
 
-  const textX = logoBuffer ? 138 : 50;
-  const textWidth = logoBuffer ? 407 : 495;
+  // ── QR code top-right ──
+  if (qrBuffer) {
+    try {
+      doc.image(qrBuffer, PAGE_W - MARGIN - BOX_H, TOP, { width: BOX_H, height: BOX_H });
+    } catch (_) {}
+  }
 
-  doc
-    .font('Helvetica-Bold')
-    .fontSize(20)
-    .fillColor('#0F172A')
-    .text(rx.clinic_name || 'DentaFlow Clinic', textX, headerTop + 5, {
-      width: textWidth,
-      align: logoBuffer ? 'left' : 'center',
-    });
+  // ── Clinic name — centred between logo and QR ──
+  doc.font('Helvetica-Bold').fontSize(17).fillColor(C.TEAL)
+     .text(rx.clinic_name || 'DentaFlow Clinic', MID_X, TOP + 2, {
+       width: MID_W, align: 'center',
+     });
 
-  doc
-    .font('Helvetica')
-    .fontSize(9)
-    .fillColor('#4B5563')
-    .text([rx.clinic_phone, rx.clinic_email].filter(Boolean).join(' | '), textX, doc.y + 4, {
-      width: textWidth,
-      align: logoBuffer ? 'left' : 'center',
-    })
-    .text([rx.clinic_address, rx.clinic_city].filter(Boolean).join(', '), {
-      width: textWidth,
-      align: logoBuffer ? 'left' : 'center',
-    });
+  const addrLine = [rx.clinic_address, rx.clinic_city].filter(Boolean).join(', ');
+  const contLine = [rx.clinic_phone, rx.clinic_email].filter(Boolean).join('  |  ');
 
-  doc.y = Math.max(doc.y, headerTop + (logoBuffer ? 82 : 52));
-  line(doc, doc.y);
-  doc.moveDown();
+  doc.font('Helvetica').fontSize(8).fillColor(C.GRAY)
+     .text(addrLine, MID_X, doc.y + 3, { width: MID_W, align: 'center' })
+     .text(contLine, MID_X, doc.y + 2, { width: MID_W, align: 'center' });
+
+  // ── Doctor details — below QR, right-aligned ──
+  const docName = [rx.doctor_first_name, rx.doctor_last_name].filter(Boolean).join(' ');
+  const drY     = TOP + BOX_H + 4;
+  doc.font('Helvetica-Bold').fontSize(8).fillColor(C.NAVY)
+     .text(docName, PAGE_W - MARGIN - BOX_H, drY, { width: BOX_H, align: 'right' });
+  if (rx.doctor_designation) {
+    doc.font('Helvetica').fontSize(7.5).fillColor(C.GRAY)
+       .text(rx.doctor_designation, PAGE_W - MARGIN - BOX_H, doc.y + 1, { width: BOX_H, align: 'right' });
+  }
+
+  const afterHeader = TOP + BOX_H + 28;
+  hline(doc, afterHeader, C.TEAL, 1);
+  return afterHeader + 10;
 }
 
-async function build(rx) {
-  const logoBuffer = await fetchLogoBuffer(rx.clinic_logo_url);
+function renderPatientStrip(doc, rx, y) {
+  const RCOL = PAGE_W - MARGIN - 140; // right column x
+
+  doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.GRAY).text('PATIENT', MARGIN, y);
+  doc.font('Helvetica-Bold').fontSize(10).fillColor(C.NAVY)
+     .text(rx.patient_name || '-', MARGIN, doc.y + 2);
+  doc.font('Helvetica').fontSize(8.5).fillColor(C.GRAY)
+     .text(rx.patient_phone || '', MARGIN, doc.y + 1);
+
+  // Date & time — right side
+  const dateStr = fmtDate(rx.created_at);
+  const timeStr = fmtTime(rx.created_at);
+  doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.GRAY).text('DATE', RCOL, y);
+  doc.font('Helvetica').fontSize(9).fillColor(C.NAVY).text(dateStr, RCOL, doc.y + 2);
+  doc.font('Helvetica').fontSize(8.5).fillColor(C.GRAY).text(timeStr, RCOL, doc.y + 2);
+
+  // Rx No — below date
+  doc.font('Helvetica-Bold').fontSize(7.5).fillColor(C.MUTED)
+     .text(`Rx No: ${rx.prescription_no}  ·  Valid: ${rx.valid_days} days`, RCOL, doc.y + 4);
+
+  const lineY = Math.max(doc.y, y + 44) + 8;
+  hline(doc, lineY);
+  return lineY + 10;
+}
+
+function renderDiagnosis(doc, rx, y) {
+  if (!rx.diagnosis && !rx.clinical_notes) return y;
+
+  if (rx.diagnosis) {
+    doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.GRAY).text('DIAGNOSIS', MARGIN, y);
+    doc.font('Helvetica').fontSize(9.5).fillColor(C.NAVY)
+       .text(rx.diagnosis, MARGIN, doc.y + 3, { width: CONTENT_W });
+    y = doc.y + 6;
+  }
+
+  if (rx.clinical_notes) {
+    doc.font('Helvetica-Bold').fontSize(8).fillColor(C.GRAY).text('CLINICAL NOTES', MARGIN, y);
+    doc.font('Helvetica').fontSize(9).fillColor(C.NAVY)
+       .text(rx.clinical_notes, MARGIN, doc.y + 3, { width: CONTENT_W });
+    y = doc.y + 6;
+  }
+
+  hline(doc, y + 4);
+  return y + 14;
+}
+
+function renderItems(doc, items, startY) {
+  const medicines  = items.filter(i => i.item_type === 'medicine');
+  const procedures = items.filter(i => i.item_type === 'procedure');
+  let y = startY;
+
+  // ── Medicines ──
+  if (medicines.length) {
+    // Large Rx symbol
+    doc.font('Helvetica-Bold').fontSize(26).fillColor(C.TEAL).text('Rx', MARGIN, y);
+    y = doc.y + 4;
+
+    medicines.forEach((item, idx) => {
+      if (y > PAGE_H - 170) { doc.addPage(); y = MARGIN + 10; }
+
+      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.NAVY)
+         .text(`${idx + 1}.  ${medTitle(item)}`, MARGIN + 14, y, { width: CONTENT_W - 14 });
+      y = doc.y + 2;
+
+      const detail = medDetail(item);
+      if (detail) {
+        doc.font('Helvetica').fontSize(8.5).fillColor(C.GRAY)
+           .text(detail, MARGIN + 24, y, { width: CONTENT_W - 24 });
+        y = doc.y + 2;
+      }
+      y += 6;
+    });
+  }
+
+  // ── Procedures ──
+  if (procedures.length) {
+    if (y > PAGE_H - 170) { doc.addPage(); y = MARGIN + 10; }
+    y += 4;
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.NAVY).text('Procedures', MARGIN, y);
+    y = doc.y + 6;
+
+    procedures.forEach((item, idx) => {
+      if (y > PAGE_H - 170) { doc.addPage(); y = MARGIN + 10; }
+
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(C.NAVY)
+         .text(`${idx + 1}.  ${procTitle(item)}`, MARGIN + 14, y, { width: CONTENT_W - 14 });
+      y = doc.y + 2;
+
+      const detail = procDetail(item);
+      if (detail) {
+        doc.font('Helvetica').fontSize(8.5).fillColor(C.GRAY)
+           .text(detail, MARGIN + 24, y, { width: CONTENT_W - 24 });
+        y = doc.y + 2;
+      }
+      y += 6;
+    });
+  }
+
+  if (!medicines.length && !procedures.length) {
+    doc.font('Helvetica').fontSize(9).fillColor(C.MUTED).text('No items added.', MARGIN, y);
+    y = doc.y + 6;
+  }
+
+  return y;
+}
+
+function renderSignature(doc, rx, y) {
+  // Nudge to safe area above footer (footer occupies bottom 54 pt)
+  const SIG_Y = PAGE_H - 120;
+  if (y < SIG_Y) y = SIG_Y;
+
+  hline(doc, y, C.LIGHT, 0.5);
+  y += 12;
+
+  const sigLineX1 = PAGE_W - MARGIN - 150;
+  const sigLineX2 = PAGE_W - MARGIN;
+  const sigLineY  = y + 38;
+
+  // Signature placeholder box
+  doc.save()
+     .rect(sigLineX1, y, 150, 40)
+     .dash(3, { space: 3 })
+     .strokeColor(C.LIGHT).lineWidth(0.5).stroke()
+     .restore();
+
+  doc.font('Helvetica').fontSize(7.5).fillColor(C.MUTED)
+     .text('(Signature)', sigLineX1, y + 14, { width: 150, align: 'center' });
+
+  // Solid signature line
+  doc.moveTo(sigLineX1, sigLineY).lineTo(sigLineX2, sigLineY)
+     .strokeColor(C.GRAY).lineWidth(0.5).stroke();
+
+  const docName = [rx.doctor_first_name, rx.doctor_last_name].filter(Boolean).join(' ');
+  doc.font('Helvetica-Bold').fontSize(9).fillColor(C.NAVY)
+     .text(docName, sigLineX1, sigLineY + 5, { width: 150, align: 'center' });
+
+  if (rx.doctor_designation) {
+    doc.font('Helvetica').fontSize(8).fillColor(C.GRAY)
+       .text(rx.doctor_designation, sigLineX1, doc.y + 2, { width: 150, align: 'center' });
+  }
+}
+
+function renderFooter(doc, rx) {
+  const FOOTER_H = 38;
+  const fy       = PAGE_H - FOOTER_H;
+
+  // Teal background strip — bleeds to page edges
+  doc.save()
+     .rect(0, fy, PAGE_W, FOOTER_H)
+     .fill(C.TEAL_DARK)
+     .restore();
+
+  // Thin accent line at top of footer
+  doc.save()
+     .moveTo(0, fy).lineTo(PAGE_W, fy)
+     .strokeColor(C.TEAL).lineWidth(1.5).stroke()
+     .restore();
+
+  const parts = [
+    rx.clinic_name,
+    [rx.clinic_address, rx.clinic_city].filter(Boolean).join(', '),
+    rx.clinic_phone,
+    rx.clinic_email,
+  ].filter(Boolean);
+
+  doc.font('Helvetica').fontSize(7.5).fillColor(C.WHITE)
+     .text(parts.join('  ·  '), MARGIN, fy + 8, {
+       width:   CONTENT_W,
+       align:   'center',
+       lineGap: 0,
+     });
+
+  doc.font('Helvetica').fontSize(6.5).fillColor('#A7F3D0')
+     .text('This is a computer-generated prescription. Valid for ' + (rx.valid_days || 7) + ' days from date of issue.',
+       MARGIN, fy + 22, { width: CONTENT_W, align: 'center' });
+}
+
+// ─── Main build function ──────────────────────────────────────────────────────
+
+async function build(rx, { logoBuffer } = {}) {
+  const qrText   = `${process.env.BOOKING_FORM_URL || 'https://dentaflow.app'}/rx/verify/${rx.prescription_no}`;
+  const qrBuffer = await buildQrBuffer(qrText);
 
   return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ margin: 50, size: 'A4' });
+    const doc    = new PDFDocument({ size: 'A4', margin: MARGIN, autoFirstPage: true });
     const chunks = [];
-
-    doc.on('data', (chunk) => chunks.push(chunk));
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('data',  c => chunks.push(c));
+    doc.on('end',   ()  => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    renderHeader(doc, rx, logoBuffer);
-
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(16)
-      .fillColor('#0D7A5F')
-      .text('Prescription');
-
-    const infoY = doc.y + 8;
-    writeField(doc, 'Rx No:', rx.prescription_no, 50, infoY);
-    writeField(doc, 'Date:', formatDate(rx.created_at), 360, infoY);
-    writeField(doc, 'Patient:', rx.patient_name, 50, infoY + 18);
-    writeField(doc, 'Phone:', rx.patient_phone, 360, infoY + 18);
-    writeField(doc, 'Doctor:', [rx.doctor_first_name, rx.doctor_last_name].filter(Boolean).join(' '), 50, infoY + 36);
-    writeField(doc, 'Valid Days:', rx.valid_days, 360, infoY + 36);
-
-    doc.y = infoY + 68;
-    if (rx.diagnosis) {
-      writeField(doc, 'Diagnosis:', rx.diagnosis, 50, doc.y);
-      doc.moveDown();
-    }
-    if (rx.clinical_notes) {
-      writeField(doc, 'Clinical Notes:', rx.clinical_notes, 50, doc.y);
-      doc.moveDown();
-    }
-
-    line(doc, doc.y + 6);
-    doc.moveDown();
-
-    doc
-      .font('Helvetica-Bold')
-      .fontSize(12)
-      .fillColor('#111827')
-      .text('Items', 50, doc.y + 8);
-
-    doc.moveDown(0.5);
-
-    const items = rx.line_items || [];
-    if (!items.length) {
-      doc.font('Helvetica').fontSize(10).fillColor('#4B5563').text('No line items.');
-    }
-
-    items.forEach((item, index) => {
-      if (doc.y > 720) doc.addPage();
-      doc
-        .font('Helvetica-Bold')
-        .fontSize(10)
-        .fillColor('#111827')
-        .text(`${index + 1}. ${itemTitle(item)}`, 50, doc.y);
-
-      const details = itemDetails(item);
-      if (details) {
-        doc
-          .font('Helvetica')
-          .fontSize(9)
-          .fillColor('#4B5563')
-          .text(details, 68, doc.y + 2, { width: 460 });
+    (async () => {
+      try {
+        let y = await renderHeader(doc, rx, logoBuffer, qrBuffer);
+        y = renderPatientStrip(doc, rx, y);
+        y = renderDiagnosis(doc, rx, y);
+        y = renderItems(doc, rx.line_items || [], y);
+        renderSignature(doc, rx, y);
+        renderFooter(doc, rx);
+        doc.end();
+      } catch (err) {
+        reject(err);
       }
-      doc.moveDown(0.8);
-    });
-
-    doc.moveDown();
-    line(doc, doc.y);
-    doc
-      .moveDown()
-      .font('Helvetica')
-      .fontSize(8)
-      .fillColor('#6B7280')
-      .text('This is a digitally generated prescription.', { align: 'center' });
-
-    doc.end();
+    })();
   });
 }
 

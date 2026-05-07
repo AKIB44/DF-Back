@@ -1,4 +1,10 @@
-const { Pool } = require('pg');
+const { Pool, types } = require('pg');
+
+// Return TIMESTAMPTZ (OID 1184) and TIMESTAMP (OID 1114) as raw strings so that
+// JSON serialization preserves the IST offset instead of converting to UTC.
+// With session timezone = Asia/Kolkata, pg returns "2026-05-08 09:45:00+05:30".
+types.setTypeParser(1184, val => val);
+types.setTypeParser(1114, val => val);
 
 function buildPoolConfig() {
   const raw = process.env.DATABASE_URL || '';
@@ -38,6 +44,12 @@ function applySslFromEnv(config) {
 }
 
 const pool = new Pool(buildPoolConfig());
+
+// Set session timezone to IST for every new connection so all TIMESTAMPTZ
+// values are returned with +05:30 offset.
+pool.on('connect', client => {
+  client.query("SET timezone = 'Asia/Kolkata'").catch(() => {});
+});
 
 module.exports = {
   query: (text, params) => pool.query(text, params),

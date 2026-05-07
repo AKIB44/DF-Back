@@ -8,21 +8,23 @@ const validate     = require('../middleware/validate');
 
 const router = express.Router();
 
-const SAFE_COLS = 'id, clinic_id, first_name, last_name, email, role, is_active, created_at';
+const SAFE_COLS = 'id, clinic_id, first_name, last_name, email, role, designation, is_active, created_at';
 
 const createSchema = Joi.object({
-  first_name: Joi.string().required(),
-  last_name:  Joi.string().optional().default(''),
-  email:      Joi.string().email().required(),
-  role:       Joi.string().valid('admin', 'doctor', 'receptionist').required(),
-  password:   Joi.string().min(8).required(),
+  first_name:  Joi.string().required(),
+  last_name:   Joi.string().optional().default(''),
+  email:       Joi.string().email().required(),
+  role:        Joi.string().valid('admin', 'doctor', 'receptionist').required(),
+  designation: Joi.string().max(100).optional().allow(''),
+  password:    Joi.string().min(8).required(),
 });
 
 const updateSchema = Joi.object({
-  first_name: Joi.string().optional(),
-  last_name:  Joi.string().optional(),
-  email:      Joi.string().trim().email().optional(),
-  role:       Joi.string().valid('admin', 'doctor', 'receptionist').optional(),
+  first_name:  Joi.string().optional(),
+  last_name:   Joi.string().optional(),
+  email:       Joi.string().trim().email().optional(),
+  role:        Joi.string().valid('admin', 'doctor', 'receptionist').optional(),
+  designation: Joi.string().max(100).optional().allow(''),
   is_active:  Joi.boolean().optional(),
 });
 
@@ -46,7 +48,7 @@ router.get('/', async (req, res, next) => {
 
 router.post('/', validate(createSchema), async (req, res, next) => {
   try {
-    const { first_name, last_name, email, role, password } = req.body;
+    const { first_name, last_name, email, role, designation, password } = req.body;
 
     const existing = await db.query(`SELECT id FROM users WHERE email = $1`, [email]);
     if (existing.rows.length) {
@@ -55,10 +57,10 @@ router.post('/', validate(createSchema), async (req, res, next) => {
 
     const password_hash = await bcrypt.hash(password, 10);
     const result = await db.query(
-      `INSERT INTO users (clinic_id, first_name, last_name, email, password_hash, role)
-       VALUES ($1,$2,$3,$4,$5,$6)
+      `INSERT INTO users (clinic_id, first_name, last_name, email, password_hash, role, designation)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
        RETURNING ${SAFE_COLS}`,
-      [req.user.clinic_id, first_name, last_name || '', email, password_hash, role]
+      [req.user.clinic_id, first_name, last_name || '', email, password_hash, role, designation || null]
     );
     res.status(201).json({ user: result.rows[0] });
   } catch (err) {
@@ -84,16 +86,18 @@ router.put('/:id', validate(updateSchema), async (req, res, next) => {
       }
     }
 
+    const { designation } = req.body;
     const result = await db.query(
       `UPDATE users SET
-         first_name = COALESCE($1, first_name),
-         last_name  = COALESCE($2, last_name),
-         email      = COALESCE($3, email),
-         role       = COALESCE($4, role),
-         is_active  = COALESCE($5, is_active)
-       WHERE id=$6 AND clinic_id=$7
+         first_name  = COALESCE($1, first_name),
+         last_name   = COALESCE($2, last_name),
+         email       = COALESCE($3, email),
+         role        = COALESCE($4, role),
+         is_active   = COALESCE($5, is_active),
+         designation = COALESCE($6, designation)
+       WHERE id=$7 AND clinic_id=$8
        RETURNING ${SAFE_COLS}`,
-      [first_name, last_name, email, role, is_active, req.params.id, req.user.clinic_id]
+      [first_name, last_name, email, role, is_active, designation, req.params.id, req.user.clinic_id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Staff member not found' });
     res.json({ user: result.rows[0] });

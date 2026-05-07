@@ -2,9 +2,10 @@ const express  = require('express');
 const Joi      = require('joi');
 const db       = require('../db');
 const { generateSlots } = require('../helpers/slots');
-const authenticate = require('../middleware/authenticate');
-const authorize    = require('../middleware/authorize');
-const validate     = require('../middleware/validate');
+const authenticate     = require('../middleware/authenticate');
+const authorize        = require('../middleware/authorize');
+const validate         = require('../middleware/validate');
+const bus              = require('../services/appointmentBus');
 
 const router = express.Router();
 
@@ -94,6 +95,52 @@ router.get('/slots', validate.query(slotsQuerySchema), async (req, res, next) =>
   }
 });
 
+// ─── GET /stream — SSE push for schedule screen ───────────────────────────────
+
+router.get('/stream', (req, res) => {
+  // EventSource cannot send custom headers, so accept token via ?token= query param.
+  const jwt    = require('jsonwebtoken');
+  const raw    = req.headers.authorization?.startsWith('Bearer ')
+    ? req.headers.authorization.slice(7)
+    : req.query.token;
+
+  if (!raw) return res.status(401).json({ error: 'Missing token' });
+
+  let user;
+  try {
+    user = jwt.verify(raw, process.env.JWT_SECRET);
+  } catch {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+
+  res.setHeader('Content-Type',  'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection',    'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders();
+
+  const clinicId = user.clinic_id;
+
+  const send = (event, data) => {
+    res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const onNew     = d => { if (d.clinic_id === clinicId) send('appointment:new',     d.appointment); };
+  const onUpdated = d => { if (d.clinic_id === clinicId) send('appointment:updated', d.appointment); };
+
+  bus.on('appointment:new',     onNew);
+  bus.on('appointment:updated', onUpdated);
+
+  // Keep-alive comment every 25 s (proxies drop idle SSE connections after 30 s)
+  const ping = setInterval(() => res.write(': ping\n\n'), 25000);
+
+  req.on('close', () => {
+    bus.off('appointment:new',     onNew);
+    bus.off('appointment:updated', onUpdated);
+    clearInterval(ping);
+  });
+});
+
 // ─── GET / (authenticated) ────────────────────────────────────────────────────
 
 router.get('/', authenticate, async (req, res, next) => {
@@ -101,6 +148,8 @@ router.get('/', authenticate, async (req, res, next) => {
     const { date, chair_id, status, limit = 100 } = req.query;
     if (!date) return res.status(400).json({ error: 'date is required' });
 
+    // Use explicit IST range so PostgreSQL can use the (clinic_id, scheduled_at) index.
+    // Casting the column side (scheduled_at::date) kills index seeks.
     const result = await db.query(
       `SELECT
          a.*,
@@ -111,7 +160,8 @@ router.get('/', authenticate, async (req, res, next) => {
        JOIN patients p ON p.id = a.patient_id
        JOIN services s ON s.id = a.service_id
        WHERE a.clinic_id = $1
-         AND a.scheduled_at::date = $2::date
+         AND a.scheduled_at >= ($2::date)::timestamptz AT TIME ZONE 'Asia/Kolkata'
+         AND a.scheduled_at <  ($2::date + 1)::timestamptz AT TIME ZONE 'Asia/Kolkata'
          AND ($3::uuid IS NULL OR a.chair_id = $3)
          AND ($4::text IS NULL OR a.status = $4)
        ORDER BY a.scheduled_at ASC
@@ -203,16 +253,24 @@ router.post('/', validate(bookingSchema), async (req, res, next) => {
     );
 
     const appt = apptResult.rows[0];
-    res.status(201).json({
-      appointment: {
-        id:           appt.id,
-        patient_id:   appt.patient_id,
-        patient_name: patient.name,
-        service_name: svcResult.rows[0].name,
-        scheduled_at: appt.scheduled_at,
-        status:       appt.status,
-      },
-    });
+    const appointmentPayload = {
+      id:               appt.id,
+      patient_id:       appt.patient_id,
+      patient_name:     patient.name,
+      patient_phone:    patient.phone,
+      service_id:       appt.service_id,
+      service_name:     svcResult.rows[0].name,
+      chair_id:         appt.chair_id,
+      scheduled_at:     appt.scheduled_at,
+      duration_minutes: appt.duration_minutes,
+      status:           appt.status,
+      booking_source:   appt.booking_source,
+      notes:            appt.notes,
+    };
+
+    bus.emit('appointment:new', { clinic_id: clinicId, appointment: appointmentPayload });
+
+    res.status(201).json({ appointment: appointmentPayload });
   } catch (err) {
     next(err);
   }
@@ -266,6 +324,7 @@ router.patch('/:id/status', authenticate, validate(statusSchema), async (req, re
       `UPDATE appointments SET status=$1, updated_at=now() WHERE id=$2 RETURNING *`,
       [req.body.status, appt.id]
     );
+    bus.emit('appointment:updated', { clinic_id: req.user.clinic_id, appointment: updated.rows[0] });
     res.json({ appointment: updated.rows[0] });
   } catch (err) {
     next(err);
@@ -305,6 +364,7 @@ router.patch('/:id', authenticate, authorize('admin', 'receptionist'), validate(
        WHERE id=$4 RETURNING *`,
       [newScheduledAt, newChairId, newNotes, appt.id]
     );
+    bus.emit('appointment:updated', { clinic_id: req.user.clinic_id, appointment: updated.rows[0] });
     res.json({ appointment: updated.rows[0] });
   } catch (err) {
     next(err);

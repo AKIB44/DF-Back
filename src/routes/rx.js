@@ -17,63 +17,63 @@ const router = express.Router();
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
 const lineItemSchema = Joi.object({
-  itemType:        Joi.string().valid('medicine', 'procedure').required(),
-  refId:           Joi.number().integer().positive().required(),
-  sortOrder:       Joi.number().integer().min(1).max(50).default(1),
-  dosage:          Joi.string().max(80).optional().allow(''),
-  frequency:       Joi.string().max(60).optional().allow(''),
-  duration:        Joi.string().max(40).optional().allow(''),
-  quantity:        Joi.string().max(40).optional().allow(''),
-  procedureStatus: Joi.string().valid('planned', 'done', 'skipped').optional(),
-  instructions:    Joi.string().max(2000).optional().allow(''),
+  item_type:        Joi.string().valid('medicine', 'procedure').required(),
+  ref_id:           Joi.number().integer().positive().required(),
+  sort_order:       Joi.number().integer().min(1).max(50).default(1),
+  dosage:           Joi.string().max(80).optional().allow(''),
+  frequency:        Joi.string().max(60).optional().allow(''),
+  duration:         Joi.string().max(40).optional().allow(''),
+  quantity:         Joi.string().max(40).optional().allow(''),
+  procedure_status: Joi.string().valid('planned', 'done', 'skipped').optional(),
+  instructions:     Joi.string().max(2000).optional().allow(''),
 });
 
 const rxCreateSchema = Joi.object({
-  patientId:     Joi.string().uuid().required(),
-  appointmentId: Joi.string().uuid().required(),
-  diagnosis:     Joi.string().max(500).optional().allow(''),
-  clinicalNotes: Joi.string().max(5000).optional().allow(''),
-  validDays:     Joi.number().integer().min(1).max(365).default(7),
-  refillable:    Joi.boolean().default(false),
-  items:         Joi.array().items(lineItemSchema).min(1).max(50).required(),
+  patient_id:     Joi.string().uuid().required(),
+  appointment_id: Joi.string().uuid().required(),
+  diagnosis:      Joi.string().max(500).optional().allow(''),
+  clinical_notes: Joi.string().max(5000).optional().allow(''),
+  valid_days:     Joi.number().integer().min(1).max(365).default(7),
+  refillable:     Joi.boolean().default(false),
+  items:          Joi.array().items(lineItemSchema).min(1).max(50).required(),
 });
 
 const rxUpdateSchema = Joi.object({
-  diagnosis:     Joi.string().max(500).optional().allow(''),
-  clinicalNotes: Joi.string().max(5000).optional().allow(''),
-  items:         Joi.array().items(lineItemSchema).min(1).max(50).optional(),
+  diagnosis:      Joi.string().max(500).optional().allow(''),
+  clinical_notes: Joi.string().max(5000).optional().allow(''),
+  items:          Joi.array().items(lineItemSchema).min(1).max(50).optional(),
 });
 
 const medCreateSchema = Joi.object({
-  genericName:  Joi.string().max(150).required(),
-  brandName:    Joi.string().max(150).optional().allow(''),
+  generic_name: Joi.string().max(150).required(),
+  brand_name:   Joi.string().max(150).optional().allow(''),
   category:     Joi.string().valid('antibiotic','analgesic','anti_inflammatory','antifungal','antiseptic','vitamin','topical','other').required(),
-  dosageForm:   Joi.string().valid('tablet','capsule','syrup','gel','drops','injection','mouthwash').required(),
+  dosage_form:  Joi.string().valid('tablet','capsule','syrup','gel','drops','injection','mouthwash').required(),
   strength:     Joi.string().max(50).required(),
-  defaultDose:  Joi.string().max(80).optional().allow(''),
-  defaultDays:  Joi.number().integer().min(1).max(365).optional(),
+  default_dose: Joi.string().max(80).optional().allow(''),
+  default_days: Joi.number().integer().min(1).max(365).optional(),
   notes:        Joi.string().max(500).optional().allow(''),
 });
 
 const medUpdateSchema = medCreateSchema.fork(
-  ['genericName','category','dosageForm','strength'],
+  ['generic_name','category','dosage_form','strength'],
   f => f.optional()
-).keys({ isActive: Joi.boolean().optional() });
+).keys({ is_active: Joi.boolean().optional() });
 
 const procCreateSchema = Joi.object({
-  procedureCode: Joi.string().max(30).required(),
-  procedureName: Joi.string().max(200).required(),
-  svcId:         Joi.string().max(10).required(),
-  procedureStep: Joi.number().integer().min(1).optional(),
-  defaultNotes:  Joi.string().optional().allow(''),
-  durationDays:  Joi.number().integer().min(0).default(0),
-  followupDays:  Joi.number().integer().min(1).optional(),
+  procedure_code: Joi.string().max(30).required(),
+  procedure_name: Joi.string().max(200).required(),
+  svc_id:         Joi.string().max(10).required(),
+  procedure_step: Joi.number().integer().min(1).optional(),
+  default_notes:  Joi.string().optional().allow(''),
+  duration_days:  Joi.number().integer().min(0).default(0),
+  followup_days:  Joi.number().integer().min(1).optional(),
 });
 
 const procUpdateSchema = procCreateSchema.fork(
-  ['procedureCode','procedureName','svcId'],
+  ['procedure_code','procedure_name','svc_id'],
   f => f.optional()
-).keys({ isActive: Joi.boolean().optional() });
+).keys({ is_active: Joi.boolean().optional() });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -97,14 +97,14 @@ async function insertLineItems(client, prescriptionId, items) {
 
   const flat = items.flatMap((item, idx) => [
     prescriptionId,
-    item.itemType,
-    item.refId,
-    item.sortOrder || idx + 1,
+    item.item_type,
+    item.ref_id,
+    item.sort_order      || idx + 1,
     item.dosage          || null,
     item.frequency       || null,
     item.duration        || null,
     item.quantity        || null,
-    item.procedureStatus || 'planned',
+    item.procedure_status || 'planned',
     item.instructions    || null,
   ]);
 
@@ -136,14 +136,14 @@ router.get('/master/medicines', authenticate, async (req, res, next) => {
 
 router.post('/master/medicines', authenticate, authorize('admin'), validate(medCreateSchema), async (req, res, next) => {
   try {
-    const { genericName, brandName, category, dosageForm, strength, defaultDose, defaultDays, notes } = req.body;
+    const { generic_name, brand_name, category, dosage_form, strength, default_dose, default_days, notes } = req.body;
     const result = await db.query(
       `INSERT INTO rx_medicines
          (clinic_id, generic_name, brand_name, category, dosage_form, strength, default_dose, default_days, notes)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING *`,
-      [req.user.clinic_id, genericName, brandName || null, category, dosageForm,
-       strength, defaultDose || null, defaultDays || null, notes || null]
+      [req.user.clinic_id, generic_name, brand_name || null, category, dosage_form,
+       strength, default_dose || null, default_days || null, notes || null]
     );
     res.status(201).json({ data: result.rows[0] });
   } catch (err) { next(err); }
@@ -152,9 +152,9 @@ router.post('/master/medicines', authenticate, authorize('admin'), validate(medC
 router.patch('/master/medicines/:id', authenticate, authorize('admin'), validate(medUpdateSchema), async (req, res, next) => {
   try {
     const FIELD_MAP = {
-      genericName: 'generic_name', brandName: 'brand_name', category: 'category',
-      dosageForm: 'dosage_form', strength: 'strength', defaultDose: 'default_dose',
-      defaultDays: 'default_days', notes: 'notes', isActive: 'is_active',
+      generic_name: 'generic_name', brand_name: 'brand_name', category: 'category',
+      dosage_form: 'dosage_form', strength: 'strength', default_dose: 'default_dose',
+      default_days: 'default_days', notes: 'notes', is_active: 'is_active',
     };
     const updates = [];
     const params  = [];
@@ -219,15 +219,15 @@ router.get('/master/procedures', authenticate, async (req, res, next) => {
 
 router.post('/master/procedures', authenticate, authorize('admin'), validate(procCreateSchema), async (req, res, next) => {
   try {
-    const { procedureCode, procedureName, svcId, procedureStep, defaultNotes, durationDays, followupDays } = req.body;
+    const { procedure_code, procedure_name, svc_id, procedure_step, default_notes, duration_days, followup_days } = req.body;
     const result = await db.query(
       `INSERT INTO rx_procedures
          (clinic_id, procedure_code, procedure_name, svc_id, procedure_step,
           default_notes, duration_days, followup_days)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING *`,
-      [req.user.clinic_id, procedureCode, procedureName, svcId,
-       procedureStep || null, defaultNotes || null, durationDays, followupDays || null]
+      [req.user.clinic_id, procedure_code, procedure_name, svc_id,
+       procedure_step || null, default_notes || null, duration_days, followup_days || null]
     );
     res.status(201).json({ data: result.rows[0] });
   } catch (err) { next(err); }
@@ -236,9 +236,9 @@ router.post('/master/procedures', authenticate, authorize('admin'), validate(pro
 router.patch('/master/procedures/:id', authenticate, authorize('admin'), validate(procUpdateSchema), async (req, res, next) => {
   try {
     const FIELD_MAP = {
-      procedureCode: 'procedure_code', procedureName: 'procedure_name', svcId: 'svc_id',
-      procedureStep: 'procedure_step', defaultNotes: 'default_notes',
-      durationDays: 'duration_days', followupDays: 'followup_days', isActive: 'is_active',
+      procedure_code: 'procedure_code', procedure_name: 'procedure_name', svc_id: 'svc_id',
+      procedure_step: 'procedure_step', default_notes: 'default_notes',
+      duration_days: 'duration_days', followup_days: 'followup_days', is_active: 'is_active',
     };
     const updates = [];
     const params  = [];
@@ -318,14 +318,14 @@ router.get('/master/defaults', authenticate, async (req, res, next) => {
 router.post('/prescriptions', authenticate, validate(rxCreateSchema), async (req, res, next) => {
   const client = await db.pool.connect();
   try {
-    const { patientId, appointmentId, diagnosis, clinicalNotes, validDays, refillable, items } = req.body;
+    const { patient_id, appointment_id, diagnosis, clinical_notes, valid_days, refillable, items } = req.body;
     const doctorId = req.user.sub;
     const clinicId = req.user.clinic_id;
 
     await client.query('BEGIN');
 
     const patCheck = await client.query(
-      `SELECT id FROM patients WHERE id=$1 AND clinic_id=$2`, [patientId, clinicId]
+      `SELECT id FROM patients WHERE id=$1 AND clinic_id=$2`, [patient_id, clinicId]
     );
     if (!patCheck.rows.length) {
       await client.query('ROLLBACK');
@@ -334,22 +334,11 @@ router.post('/prescriptions', authenticate, validate(rxCreateSchema), async (req
 
     const apptCheck = await client.query(
       `SELECT id FROM appointments WHERE id=$1 AND patient_id=$2 AND clinic_id=$3`,
-      [appointmentId, patientId, clinicId]
+      [appointment_id, patient_id, clinicId]
     );
     if (!apptCheck.rows.length) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Appointment not found' });
-    }
-
-    const dupCheck = await client.query(
-      `SELECT id FROM prescriptions WHERE appointment_id=$1`, [appointmentId]
-    );
-    if (dupCheck.rows.length) {
-      await client.query('ROLLBACK');
-      return res.status(409).json({
-        error: 'A prescription already exists for this appointment',
-        existing_id: dupCheck.rows[0].id,
-      });
     }
 
     const prescriptionNo = await nextRxNumber(client);
@@ -360,8 +349,8 @@ router.post('/prescriptions', authenticate, validate(rxCreateSchema), async (req
           diagnosis, clinical_notes, valid_days, refillable)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
        RETURNING id, prescription_no`,
-      [prescriptionNo, patientId, appointmentId, doctorId, clinicId,
-       diagnosis || null, clinicalNotes || null, validDays, refillable]
+      [prescriptionNo, patient_id, appointment_id, doctorId, clinicId,
+       diagnosis || null, clinical_notes || null, valid_days, refillable]
     );
 
     const prescriptionId = rxResult.rows[0].id;
@@ -420,7 +409,7 @@ router.get('/prescriptions/:id', authenticate, async (req, res, next) => {
               c.phone         AS clinic_phone,
               c.address       AS clinic_address,
               c.city          AS clinic_city,
-              c.logo_url      AS clinic_logo_url
+              c.logo_s3_key   AS clinic_logo_s3_key
        FROM prescriptions p
        JOIN patients pat ON pat.id = p.patient_id
        JOIN users    u   ON u.id   = p.doctor_id
@@ -453,7 +442,7 @@ router.get('/prescriptions/:id', authenticate, async (req, res, next) => {
 router.put('/prescriptions/:id', authenticate, validate(rxUpdateSchema), async (req, res, next) => {
   const client = await db.pool.connect();
   try {
-    const { diagnosis, clinicalNotes, items } = req.body;
+    const { diagnosis, clinical_notes, items } = req.body;
     await client.query('BEGIN');
 
     const existing = await client.query(
@@ -467,8 +456,8 @@ router.put('/prescriptions/:id', authenticate, validate(rxUpdateSchema), async (
 
     const updates = [];
     const params  = [];
-    if (diagnosis     !== undefined) { params.push(diagnosis);     updates.push(`diagnosis=$${params.length}`);      }
-    if (clinicalNotes !== undefined) { params.push(clinicalNotes); updates.push(`clinical_notes=$${params.length}`); }
+    if (diagnosis      !== undefined) { params.push(diagnosis);      updates.push(`diagnosis=$${params.length}`);       }
+    if (clinical_notes !== undefined) { params.push(clinical_notes); updates.push(`clinical_notes=$${params.length}`); }
     if (updates.length) {
       params.push(req.params.id);
       await client.query(
@@ -500,11 +489,17 @@ router.post('/prescriptions/:id/generate', authenticate, async (req, res, next) 
   try {
     const rxResult = await db.query(
       `SELECT p.*,
-              pat.name    AS patient_name,  pat.phone  AS patient_phone,
-              u.first_name AS doctor_first_name, u.last_name AS doctor_last_name,
-              c.name      AS clinic_name,   c.phone    AS clinic_phone,
-              c.address   AS clinic_address, c.city    AS clinic_city,
-              c.logo_url  AS clinic_logo_url
+              pat.name         AS patient_name,
+              pat.phone        AS patient_phone,
+              u.first_name     AS doctor_first_name,
+              u.last_name      AS doctor_last_name,
+              u.designation    AS doctor_designation,
+              c.name           AS clinic_name,
+              c.phone          AS clinic_phone,
+              c.email          AS clinic_email,
+              c.address        AS clinic_address,
+              c.city           AS clinic_city,
+              c.logo_s3_key    AS clinic_logo_s3_key
        FROM prescriptions p
        JOIN patients pat ON pat.id = p.patient_id
        JOIN users    u   ON u.id   = p.doctor_id
@@ -527,7 +522,26 @@ router.post('/prescriptions/:id/generate', authenticate, async (req, res, next) 
       [req.params.id]
     );
 
-    const pdfBuffer = await rxPdfBuilder.build({ ...prescription, line_items: linesResult.rows });
+    // Fetch logo buffer directly from S3 (no presigned URL roundtrip needed)
+    let logoBuffer = null;
+    if (prescription.clinic_logo_s3_key) {
+      try {
+        const { getS3Client } = require('../services/s3Service');
+        const { GetObjectCommand } = require('@aws-sdk/client-s3');
+        const resp = await getS3Client().send(new GetObjectCommand({
+          Bucket: process.env.AWS_S3_BUCKET,
+          Key:    prescription.clinic_logo_s3_key,
+        }));
+        const chunks = [];
+        for await (const chunk of resp.Body) chunks.push(chunk);
+        logoBuffer = Buffer.concat(chunks);
+      } catch (_) { /* logo fetch failure should not block PDF */ }
+    }
+
+    const pdfBuffer = await rxPdfBuilder.build(
+      { ...prescription, line_items: linesResult.rows },
+      { logoBuffer }
+    );
 
     const s3Key = buildPrescriptionPdfKey({
       patientId:       prescription.patient_id,

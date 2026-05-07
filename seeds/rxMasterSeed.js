@@ -131,7 +131,7 @@ async function run() {
     const result = await db.query(`SELECT id FROM clinics WHERE is_active = true ORDER BY created_at ASC`);
     clinicIds = result.rows.map(r => r.id);
   }
-
+  
   if (!clinicIds.length) {
     console.log('No clinics found. Run the main seed first: npm run seed');
     return;

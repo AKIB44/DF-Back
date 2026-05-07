@@ -18,8 +18,9 @@ async function generateSlots({ date, serviceId, chairId, clinicId }) {
     const mm = String(start % 60).padStart(2, '0');
     const slotTime = `${hh}:${mm}`;
 
-    const slotStart = new Date(`${date}T${slotTime}:00`);
-    const slotEnd   = new Date(slotStart.getTime() + slotSize * 60000);
+    // Explicitly mark as IST so Node.js doesn't misparse as UTC.
+    const slotStart = `${date}T${slotTime}:00+05:30`;
+    const slotEnd   = new Date(new Date(slotStart).getTime() + slotSize * 60000).toISOString();
 
     const conflict = await db.query(
       `SELECT id FROM appointments
@@ -29,7 +30,7 @@ async function generateSlots({ date, serviceId, chairId, clinicId }) {
          AND scheduled_at < $3
          AND scheduled_at + (duration_minutes * interval '1 minute') > $4
        LIMIT 1`,
-      [chairId, clinicId || null, slotEnd.toISOString(), slotStart.toISOString()]
+      [chairId, clinicId || null, slotEnd, slotStart]
     );
 
     slots.push({ time: slotTime, taken: conflict.rows.length > 0 });
