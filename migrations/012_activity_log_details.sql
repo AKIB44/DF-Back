@@ -1,0 +1,1 @@
+ALTER TABLE activity_log ADD COLUMN IF NOT EXISTS details TEXT;

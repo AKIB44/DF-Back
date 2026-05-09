@@ -2,10 +2,16 @@ const express  = require('express');
 const Joi      = require('joi');
 const db       = require('../db');
 const { generateSlots } = require('../helpers/slots');
-const authenticate     = require('../middleware/authenticate');
-const authorize        = require('../middleware/authorize');
-const validate         = require('../middleware/validate');
-const bus              = require('../services/appointmentBus');
+const authenticate  = require('../middleware/authenticate');
+const validate      = require('../middleware/validate');
+const bus           = require('../services/appointmentBus');
+const tenantScope   = require('../rbac/tenant-scope.middleware');
+const auditMw       = require('../audit/audit.middleware');
+const { requirePermission } = require('../rbac/require-permission.middleware');
+const P             = require('../rbac/permissions.constants');
+
+// Shorthand: authenticate → tenantScope → auditMw chain for protected routes
+const authChain = [authenticate, tenantScope, auditMw];
 
 const router = express.Router();
 
@@ -15,18 +21,23 @@ const bookingSchema = Joi.object({
   service_id:     Joi.string().required(),
   chair_id:       Joi.string().required(),
   scheduled_at:   Joi.string().isoDate().required(),
-  booking_source: Joi.string().valid('website', 'whatsapp', 'direct', 'staff').required(),
+  booking_source: Joi.string().valid('website', 'whatsapp', 'direct', 'staff', 'internal').required(),
   notes:          Joi.string().optional().allow(''),
   intake_data:    Joi.object().optional().default({}),
   patient: Joi.object({
-    name:  Joi.string().required(),
-    phone: Joi.string().required(),
-    email: Joi.string().email().optional().allow(''),
+    name:             Joi.string().required(),
+    phone:            Joi.string().required(),
+    email:            Joi.string().email().optional().allow(''),
+    age:              Joi.number().integer().min(0).max(150).optional(),
+    gender:           Joi.string().valid('male', 'female', 'other').optional(),
+    address:          Joi.string().optional().allow(''),
+    clinical_history: Joi.string().optional().allow(''),
   }).required(),
 });
 
 const statusSchema = Joi.object({
-  status: Joi.string().valid('confirmed', 'in_progress', 'done', 'no_show', 'cancelled').required(),
+  status:        Joi.string().valid('confirmed', 'in_progress', 'done', 'no_show', 'cancelled').required(),
+  cancel_reason: Joi.string().optional().allow(''),
 });
 
 const rescheduleSchema = Joi.object({
@@ -143,7 +154,7 @@ router.get('/stream', (req, res) => {
 
 // ─── GET / (authenticated) ────────────────────────────────────────────────────
 
-router.get('/', authenticate, async (req, res, next) => {
+router.get('/', ...authChain, requirePermission(P.APPOINTMENT_VIEW), async (req, res, next) => {
   try {
     const { date, chair_id, status, limit = 100 } = req.query;
     if (!date) return res.status(400).json({ error: 'date is required' });
@@ -174,23 +185,13 @@ router.get('/', authenticate, async (req, res, next) => {
   }
 });
 
-// ─── POST / (public — no auth required) ──────────────────────────────────────
+// ─── POST / (protected — staff/internal booking) ─────────────────────────────
 
-router.post('/', validate(bookingSchema), async (req, res, next) => {
+router.post('/', ...authChain, requirePermission(P.APPOINTMENT_CREATE), validate(bookingSchema), async (req, res, next) => {
   try {
     const { service_id, chair_id, scheduled_at, booking_source, notes, intake_data = {}, patient } = req.body;
 
-    // Resolve clinic_id
-    let clinicId = null;
-    const header = req.headers.authorization;
-    if (header?.startsWith('Bearer ')) {
-      try {
-        const jwt = require('jsonwebtoken');
-        const decoded = jwt.verify(header.slice(7), process.env.JWT_SECRET);
-        clinicId = decoded.clinic_id;
-      } catch { /* fall through to DEFAULT_CLINIC_ID */ }
-    }
-    if (!clinicId) clinicId = process.env.DEFAULT_CLINIC_ID;
+    const clinicId = req.user.clinic_id;
     if (!clinicId) return res.status(400).json({ error: 'Cannot determine clinic' });
 
     // Validate service belongs to clinic and is active
@@ -213,7 +214,7 @@ router.post('/', validate(bookingSchema), async (req, res, next) => {
       return res.status(409).json({ error: 'This slot is no longer available. Please pick another time.' });
     }
 
-    // Look up or create patient
+    // Look up or create patient; always refresh demographics if provided
     let patientId;
     const existingPat = await db.query(
       `SELECT id FROM patients WHERE clinic_id=$1 AND phone=$2 LIMIT 1`,
@@ -221,10 +222,25 @@ router.post('/', validate(bookingSchema), async (req, res, next) => {
     );
     if (existingPat.rows.length) {
       patientId = existingPat.rows[0].id;
+      // Update demographics that were provided at booking time
+      const hasDemo = patient.age != null || patient.gender || patient.address || patient.clinical_history;
+      if (hasDemo) {
+        await db.query(
+          `UPDATE patients SET
+             age              = COALESCE($1, age),
+             gender           = COALESCE($2, gender),
+             address          = COALESCE($3, address),
+             clinical_history = COALESCE($4, clinical_history)
+           WHERE id = $5`,
+          [patient.age ?? null, patient.gender || null, patient.address || null, patient.clinical_history || null, patientId]
+        );
+      }
     } else {
       const newPat = await db.query(
-        `INSERT INTO patients (clinic_id, name, phone, email) VALUES ($1,$2,$3,$4) RETURNING id`,
-        [clinicId, patient.name, patient.phone, patient.email || null]
+        `INSERT INTO patients (clinic_id, name, phone, email, age, gender, address, clinical_history)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        [clinicId, patient.name, patient.phone, patient.email || null,
+         patient.age ?? null, patient.gender || null, patient.address || null, patient.clinical_history || null]
       );
       patientId = newPat.rows[0].id;
     }
@@ -278,7 +294,7 @@ router.post('/', validate(bookingSchema), async (req, res, next) => {
 
 // ─── GET /:id ─────────────────────────────────────────────────────────────────
 
-router.get('/:id', authenticate, async (req, res, next) => {
+router.get('/:id', ...authChain, requirePermission(P.APPOINTMENT_VIEW), async (req, res, next) => {
   try {
     const result = await db.query(
       `SELECT
@@ -301,7 +317,7 @@ router.get('/:id', authenticate, async (req, res, next) => {
 
 // ─── PATCH /:id/status ────────────────────────────────────────────────────────
 
-router.patch('/:id/status', authenticate, validate(statusSchema), async (req, res, next) => {
+router.patch('/:id/status', ...authChain, requirePermission(P.APPOINTMENT_UPDATE), validate(statusSchema), async (req, res, next) => {
   try {
     const apptResult = await db.query(
       `SELECT * FROM appointments WHERE id=$1 AND clinic_id=$2`,
@@ -320,9 +336,10 @@ router.patch('/:id/status', authenticate, validate(statusSchema), async (req, re
       });
     }
 
+    const cancelReason = req.body.status === 'cancelled' ? (req.body.cancel_reason || null) : null;
     const updated = await db.query(
-      `UPDATE appointments SET status=$1, updated_at=now() WHERE id=$2 RETURNING *`,
-      [req.body.status, appt.id]
+      `UPDATE appointments SET status=$1, cancel_reason=$2, updated_at=now() WHERE id=$3 RETURNING *`,
+      [req.body.status, cancelReason, appt.id]
     );
     bus.emit('appointment:updated', { clinic_id: req.user.clinic_id, appointment: updated.rows[0] });
     res.json({ appointment: updated.rows[0] });
@@ -333,7 +350,7 @@ router.patch('/:id/status', authenticate, validate(statusSchema), async (req, re
 
 // ─── PATCH /:id (reschedule) — admin + receptionist only ─────────────────────
 
-router.patch('/:id', authenticate, authorize('admin', 'receptionist'), validate(rescheduleSchema), async (req, res, next) => {
+router.patch('/:id', ...authChain, requirePermission(P.APPOINTMENT_UPDATE), validate(rescheduleSchema), async (req, res, next) => {
   try {
     const apptResult = await db.query(
       `SELECT * FROM appointments WHERE id=$1 AND clinic_id=$2`,

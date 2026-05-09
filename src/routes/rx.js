@@ -2,8 +2,11 @@ const express      = require('express');
 const Joi          = require('joi');
 const db           = require('../db');
 const authenticate = require('../middleware/authenticate');
-const authorize    = require('../middleware/authorize');
 const validate     = require('../middleware/validate');
+const tenantScope  = require('../rbac/tenant-scope.middleware');
+const auditMw      = require('../audit/audit.middleware');
+const { requirePermission } = require('../rbac/require-permission.middleware');
+const P            = require('../rbac/permissions.constants');
 const {
   buildPrescriptionPdfKey,
   getPresignedUrl,
@@ -12,7 +15,8 @@ const {
 } = require('../services/s3Service');
 const rxPdfBuilder = require('../services/rxPdfBuilder');
 
-const router = express.Router();
+const router    = express.Router();
+const authChain = [authenticate, tenantScope, auditMw];
 
 // ─── Schemas ──────────────────────────────────────────────────────────────────
 
@@ -119,7 +123,7 @@ async function insertLineItems(client, prescriptionId, items) {
 
 // ─── Master data — medicines ──────────────────────────────────────────────────
 
-router.get('/master/medicines', authenticate, async (req, res, next) => {
+router.get('/master/medicines', ...authChain, requirePermission(P.PRESCRIPTION_CREATE), async (req, res, next) => {
   try {
     const { search, category } = req.query;
     const params = [req.user.clinic_id];
@@ -134,7 +138,7 @@ router.get('/master/medicines', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/master/medicines', authenticate, authorize('admin'), validate(medCreateSchema), async (req, res, next) => {
+router.post('/master/medicines', ...authChain, requirePermission(P.CLINIC_SETTINGS), validate(medCreateSchema), async (req, res, next) => {
   try {
     const { generic_name, brand_name, category, dosage_form, strength, default_dose, default_days, notes } = req.body;
     const result = await db.query(
@@ -149,7 +153,7 @@ router.post('/master/medicines', authenticate, authorize('admin'), validate(medC
   } catch (err) { next(err); }
 });
 
-router.patch('/master/medicines/:id', authenticate, authorize('admin'), validate(medUpdateSchema), async (req, res, next) => {
+router.patch('/master/medicines/:id', ...authChain, requirePermission(P.CLINIC_SETTINGS), validate(medUpdateSchema), async (req, res, next) => {
   try {
     const FIELD_MAP = {
       generic_name: 'generic_name', brand_name: 'brand_name', category: 'category',
@@ -178,7 +182,7 @@ router.patch('/master/medicines/:id', authenticate, authorize('admin'), validate
   } catch (err) { next(err); }
 });
 
-router.delete('/master/medicines/:id', authenticate, authorize('admin'), async (req, res, next) => {
+router.delete('/master/medicines/:id', ...authChain, requirePermission(P.CLINIC_SETTINGS), async (req, res, next) => {
   try {
     // Check if medicine is referenced by any non-deleted line item for this clinic
     const inUse = await db.query(
@@ -203,7 +207,7 @@ router.delete('/master/medicines/:id', authenticate, authorize('admin'), async (
 
 // ─── Master data — procedures ─────────────────────────────────────────────────
 
-router.get('/master/procedures', authenticate, async (req, res, next) => {
+router.get('/master/procedures', ...authChain, requirePermission(P.PRESCRIPTION_CREATE), async (req, res, next) => {
   try {
     const { svc_id } = req.query;
     const params = [req.user.clinic_id];
@@ -217,7 +221,7 @@ router.get('/master/procedures', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.post('/master/procedures', authenticate, authorize('admin'), validate(procCreateSchema), async (req, res, next) => {
+router.post('/master/procedures', ...authChain, requirePermission(P.CLINIC_SETTINGS), validate(procCreateSchema), async (req, res, next) => {
   try {
     const { procedure_code, procedure_name, svc_id, procedure_step, default_notes, duration_days, followup_days } = req.body;
     const result = await db.query(
@@ -233,7 +237,7 @@ router.post('/master/procedures', authenticate, authorize('admin'), validate(pro
   } catch (err) { next(err); }
 });
 
-router.patch('/master/procedures/:id', authenticate, authorize('admin'), validate(procUpdateSchema), async (req, res, next) => {
+router.patch('/master/procedures/:id', ...authChain, requirePermission(P.CLINIC_SETTINGS), validate(procUpdateSchema), async (req, res, next) => {
   try {
     const FIELD_MAP = {
       procedure_code: 'procedure_code', procedure_name: 'procedure_name', svc_id: 'svc_id',
@@ -262,7 +266,7 @@ router.patch('/master/procedures/:id', authenticate, authorize('admin'), validat
   } catch (err) { next(err); }
 });
 
-router.delete('/master/procedures/:id', authenticate, authorize('admin'), async (req, res, next) => {
+router.delete('/master/procedures/:id', ...authChain, requirePermission(P.CLINIC_SETTINGS), async (req, res, next) => {
   try {
     const inUse = await db.query(
       `SELECT li.id FROM rx_line_items li
@@ -286,7 +290,7 @@ router.delete('/master/procedures/:id', authenticate, authorize('admin'), async 
 
 // ─── Master data — service defaults ──────────────────────────────────────────
 
-router.get('/master/defaults', authenticate, async (req, res, next) => {
+router.get('/master/defaults', ...authChain, requirePermission(P.PRESCRIPTION_CREATE), async (req, res, next) => {
   try {
     const { svc_id } = req.query;
     if (!svc_id) return res.status(400).json({ error: 'svc_id is required' });
@@ -315,7 +319,7 @@ router.get('/master/defaults', authenticate, async (req, res, next) => {
 
 // ─── Prescriptions ────────────────────────────────────────────────────────────
 
-router.post('/prescriptions', authenticate, validate(rxCreateSchema), async (req, res, next) => {
+router.post('/prescriptions', ...authChain, requirePermission(P.PRESCRIPTION_CREATE), validate(rxCreateSchema), async (req, res, next) => {
   const client = await db.pool.connect();
   try {
     const { patient_id, appointment_id, diagnosis, clinical_notes, valid_days, refillable, items } = req.body;
@@ -366,7 +370,7 @@ router.post('/prescriptions', authenticate, validate(rxCreateSchema), async (req
   }
 });
 
-router.get('/prescriptions', authenticate, async (req, res, next) => {
+router.get('/prescriptions', ...authChain, requirePermission(P.PRESCRIPTION_CREATE), async (req, res, next) => {
   try {
     const { patient_id, page = 1, limit = 10 } = req.query;
     if (!patient_id) return res.status(400).json({ error: 'patient_id is required' });
@@ -397,7 +401,7 @@ router.get('/prescriptions', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.get('/prescriptions/:id', authenticate, async (req, res, next) => {
+router.get('/prescriptions/:id', ...authChain, requirePermission(P.PRESCRIPTION_CREATE), async (req, res, next) => {
   try {
     const rxResult = await db.query(
       `SELECT p.*,
@@ -439,7 +443,7 @@ router.get('/prescriptions/:id', authenticate, async (req, res, next) => {
   } catch (err) { next(err); }
 });
 
-router.put('/prescriptions/:id', authenticate, validate(rxUpdateSchema), async (req, res, next) => {
+router.put('/prescriptions/:id', ...authChain, requirePermission(P.PRESCRIPTION_CREATE), validate(rxUpdateSchema), async (req, res, next) => {
   const client = await db.pool.connect();
   try {
     const { diagnosis, clinical_notes, items } = req.body;
@@ -485,7 +489,7 @@ router.put('/prescriptions/:id', authenticate, validate(rxUpdateSchema), async (
 
 // ─── PDF generation ───────────────────────────────────────────────────────────
 
-router.post('/prescriptions/:id/generate', authenticate, async (req, res, next) => {
+router.post('/prescriptions/:id/generate', ...authChain, requirePermission(P.PRESCRIPTION_SIGN), async (req, res, next) => {
   try {
     const rxResult = await db.query(
       `SELECT p.*,
@@ -562,7 +566,7 @@ router.post('/prescriptions/:id/generate', authenticate, async (req, res, next) 
   } catch (err) { next(err); }
 });
 
-router.get('/prescriptions/:id/pdf', authenticate, async (req, res, next) => {
+router.get('/prescriptions/:id/pdf', ...authChain, requirePermission(P.PRESCRIPTION_CREATE), async (req, res, next) => {
   try {
     const result = await db.query(
       `SELECT pdf_s3_key, pdf_generated FROM prescriptions WHERE id=$1 AND clinic_id=$2`,
@@ -584,7 +588,7 @@ router.get('/prescriptions/:id/pdf', authenticate, async (req, res, next) => {
 
 // ─── WA send hook ─────────────────────────────────────────────────────────────
 
-router.post('/prescriptions/:id/send', authenticate, async (req, res, next) => {
+router.post('/prescriptions/:id/send', ...authChain, requirePermission(P.PRESCRIPTION_SIGN), async (req, res, next) => {
   try {
     const result = await db.query(
       `UPDATE prescriptions

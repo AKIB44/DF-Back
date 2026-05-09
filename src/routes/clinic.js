@@ -3,9 +3,14 @@ const multer   = require('multer');
 const Joi      = require('joi');
 const db       = require('../db');
 const authenticate = require('../middleware/authenticate');
-const authorize    = require('../middleware/authorize');
 const validate     = require('../middleware/validate');
+const tenantScope  = require('../rbac/tenant-scope.middleware');
+const auditMw      = require('../audit/audit.middleware');
+const { requirePermission } = require('../rbac/require-permission.middleware');
+const P            = require('../rbac/permissions.constants');
 const { uploadBuffer, getPresignedUrl, deleteObject, objectExists } = require('../services/s3Service');
+
+const authChain = [authenticate, tenantScope, auditMw];
 
 const router = express.Router();
 
@@ -66,7 +71,7 @@ router.get('/public', async (req, res, next) => {
 
 // ─── Authenticated routes (all roles) ────────────────────────────────────────
 
-router.get('/', authenticate, authorize('admin', 'doctor'), async (req, res, next) => {
+router.get('/', ...authChain, async (req, res, next) => {
   try {
     const result = await db.query(`SELECT * FROM clinics WHERE id=$1`, [req.user.clinic_id]);
     if (!result.rows.length) return res.status(404).json({ error: 'Clinic not found' });
@@ -76,7 +81,7 @@ router.get('/', authenticate, authorize('admin', 'doctor'), async (req, res, nex
 
 // ─── Admin-only routes ────────────────────────────────────────────────────────
 
-router.use(authenticate, authorize('admin'));
+router.use(...authChain, requirePermission(P.CLINIC_SETTINGS));
 
 router.put('/', validate(updateSchema), async (req, res, next) => {
   try {

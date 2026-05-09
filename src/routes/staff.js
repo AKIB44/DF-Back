@@ -3,8 +3,12 @@ const bcrypt   = require('bcryptjs');
 const Joi      = require('joi');
 const db       = require('../db');
 const authenticate = require('../middleware/authenticate');
-const authorize    = require('../middleware/authorize');
 const validate     = require('../middleware/validate');
+const tenantScope  = require('../rbac/tenant-scope.middleware');
+const auditMw      = require('../audit/audit.middleware');
+const { requirePermission } = require('../rbac/require-permission.middleware');
+const P            = require('../rbac/permissions.constants');
+const { bumpVersion } = require('../rbac/permission.cache');
 
 const router = express.Router();
 
@@ -32,7 +36,7 @@ const patchSchema = Joi.object({
   is_active: Joi.boolean().required(),
 });
 
-router.use(authenticate, authorize('admin'));
+router.use(authenticate, tenantScope, auditMw, requirePermission(P.STAFF_MANAGE));
 
 router.get('/', async (req, res, next) => {
   try {
@@ -46,6 +50,8 @@ router.get('/', async (req, res, next) => {
   }
 });
 
+const ROLE_MAP = { admin: 'clinic_admin', doctor: 'doctor', receptionist: 'reception' };
+
 router.post('/', validate(createSchema), async (req, res, next) => {
   try {
     const { first_name, last_name, email, role, designation, password } = req.body;
@@ -55,14 +61,25 @@ router.post('/', validate(createSchema), async (req, res, next) => {
       return res.status(409).json({ error: 'Email already in use' });
     }
 
-    const password_hash = await bcrypt.hash(password, 10);
+    const password_hash = await bcrypt.hash(password, 12);
     const result = await db.query(
       `INSERT INTO users (clinic_id, first_name, last_name, email, password_hash, role, designation)
        VALUES ($1,$2,$3,$4,$5,$6,$7)
        RETURNING ${SAFE_COLS}`,
       [req.user.clinic_id, first_name, last_name || '', email, password_hash, role, designation || null]
     );
-    res.status(201).json({ user: result.rows[0] });
+
+    const newUser = result.rows[0];
+    const rbacCode = ROLE_MAP[role] || 'reception';
+    const roleRow = await db.query(`SELECT id FROM roles WHERE code=$1 AND is_system=true`, [rbacCode]);
+    if (roleRow.rows.length) {
+      await db.query(
+        `INSERT INTO user_roles (user_id, role_id, clinic_id, granted_by) VALUES ($1,$2,$3,$4)`,
+        [newUser.id, roleRow.rows[0].id, req.user.clinic_id, req.user.sub]
+      );
+    }
+
+    res.status(201).json({ user: newUser });
   } catch (err) {
     next(err);
   }
@@ -100,7 +117,44 @@ router.put('/:id', validate(updateSchema), async (req, res, next) => {
       [first_name, last_name, email, role, is_active, designation, req.params.id, req.user.clinic_id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Staff member not found' });
+
+    if (role !== undefined) {
+      const rbacCode = ROLE_MAP[role] || 'reception';
+      const roleRow = await db.query(`SELECT id FROM roles WHERE code=$1 AND is_system=true`, [rbacCode]);
+      if (roleRow.rows.length) {
+        await db.query(
+          `UPDATE user_roles SET valid_to=now() WHERE user_id=$1 AND clinic_id=$2 AND (valid_to IS NULL OR valid_to > now())`,
+          [req.params.id, req.user.clinic_id]
+        );
+        await db.query(
+          `INSERT INTO user_roles (user_id, role_id, clinic_id, granted_by) VALUES ($1,$2,$3,$4)`,
+          [req.params.id, roleRow.rows[0].id, req.user.clinic_id, req.user.sub]
+        );
+        await bumpVersion(req.params.id);
+      }
+    }
+
     res.json({ user: result.rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+router.delete('/:id', async (req, res, next) => {
+  try {
+    if (req.params.id === req.user.sub) {
+      return res.status(400).json({ error: 'Cannot delete your own account' });
+    }
+    await db.query(
+      `UPDATE users SET is_active=false WHERE id=$1 AND clinic_id=$2`,
+      [req.params.id, req.user.clinic_id]
+    );
+    await db.query(
+      `UPDATE user_roles SET valid_to=now() WHERE user_id=$1 AND clinic_id=$2`,
+      [req.params.id, req.user.clinic_id]
+    );
+    await bumpVersion(req.params.id);
+    res.status(204).send();
   } catch (err) {
     next(err);
   }

@@ -10,7 +10,9 @@ function resolveClinicIdForOptionalAuth(req) {
   if (header?.startsWith('Bearer ')) {
     try {
       const decoded = jwt.verify(header.slice(7), process.env.JWT_SECRET);
-      if (decoded.clinic_id) return decoded.clinic_id;
+      if (decoded.clinic_id || decoded.active_clinic_id) {
+        return decoded.clinic_id || decoded.active_clinic_id;
+      }
     } catch {
       /* treat as anonymous */
     }

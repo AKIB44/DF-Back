@@ -1,0 +1,2 @@
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS age              INTEGER;
+ALTER TABLE patients ADD COLUMN IF NOT EXISTS clinical_history TEXT;

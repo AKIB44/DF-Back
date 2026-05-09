@@ -1,23 +1,29 @@
 const express  = require('express');
 const Joi      = require('joi');
 const db       = require('../db');
-const authenticate = require('../middleware/authenticate');
-const validate     = require('../middleware/validate');
+const authenticate   = require('../middleware/authenticate');
+const validate       = require('../middleware/validate');
+const tenantScope    = require('../rbac/tenant-scope.middleware');
+const auditMw        = require('../audit/audit.middleware');
+const { requirePermission } = require('../rbac/require-permission.middleware');
+const P              = require('../rbac/permissions.constants');
 
 const router = express.Router();
 
 const patientSchema = Joi.object({
-  name:    Joi.string().required(),
-  phone:   Joi.string().required(),
-  email:   Joi.string().email().optional().allow(''),
-  dob:     Joi.string().isoDate().optional(),
-  gender:  Joi.string().valid('male', 'female', 'other').optional(),
-  address: Joi.string().optional(),
+  name:             Joi.string().required(),
+  phone:            Joi.string().required(),
+  email:            Joi.string().email().optional().allow(''),
+  dob:              Joi.string().isoDate().optional(),
+  gender:           Joi.string().valid('male', 'female', 'other').optional(),
+  address:          Joi.string().optional().allow(''),
+  age:              Joi.number().integer().min(0).max(150).optional(),
+  clinical_history: Joi.string().optional().allow(''),
 });
 
-router.use(authenticate);
+router.use(authenticate, tenantScope, auditMw);
 
-router.get('/', async (req, res, next) => {
+router.get('/', requirePermission(P.PATIENT_VIEW), async (req, res, next) => {
   try {
     const { search, limit = 20 } = req.query;
     const cap = Math.min(Number(limit) || 20, 100);
@@ -43,9 +49,9 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.post('/', validate(patientSchema), async (req, res, next) => {
+router.post('/', requirePermission(P.PATIENT_CREATE), validate(patientSchema), async (req, res, next) => {
   try {
-    const { name, phone, email, dob, gender, address } = req.body;
+    const { name, phone, email, dob, gender, address, age, clinical_history } = req.body;
 
     const dup = await db.query(
       `SELECT id FROM patients WHERE clinic_id = $1 AND phone = $2`,
@@ -59,9 +65,9 @@ router.post('/', validate(patientSchema), async (req, res, next) => {
     }
 
     const result = await db.query(
-      `INSERT INTO patients (clinic_id, name, phone, email, dob, gender, address)
-       VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
-      [req.user.clinic_id, name, phone, email || null, dob || null, gender || null, address || null]
+      `INSERT INTO patients (clinic_id, name, phone, email, dob, gender, address, age, clinical_history)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [req.user.clinic_id, name, phone, email || null, dob || null, gender || null, address || null, age ?? null, clinical_history || null]
     );
     res.status(201).json({ patient: result.rows[0] });
   } catch (err) {
@@ -69,7 +75,7 @@ router.post('/', validate(patientSchema), async (req, res, next) => {
   }
 });
 
-router.get('/:id', async (req, res, next) => {
+router.get('/:id', requirePermission(P.PATIENT_VIEW), async (req, res, next) => {
   try {
     const patResult = await db.query(
       `SELECT * FROM patients WHERE id=$1 AND clinic_id=$2`,
@@ -93,13 +99,13 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
-router.put('/:id', validate(patientSchema), async (req, res, next) => {
+router.put('/:id', requirePermission(P.PATIENT_UPDATE), validate(patientSchema), async (req, res, next) => {
   try {
-    const { name, phone, email, dob, gender, address } = req.body;
+    const { name, phone, email, dob, gender, address, age, clinical_history } = req.body;
     const result = await db.query(
-      `UPDATE patients SET name=$1, phone=$2, email=$3, dob=$4, gender=$5, address=$6
-       WHERE id=$7 AND clinic_id=$8 RETURNING *`,
-      [name, phone, email || null, dob || null, gender || null, address || null, req.params.id, req.user.clinic_id]
+      `UPDATE patients SET name=$1, phone=$2, email=$3, dob=$4, gender=$5, address=$6, age=$7, clinical_history=$8
+       WHERE id=$9 AND clinic_id=$10 RETURNING *`,
+      [name, phone, email || null, dob || null, gender || null, address || null, age ?? null, clinical_history || null, req.params.id, req.user.clinic_id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Patient not found' });
     res.json({ patient: result.rows[0] });

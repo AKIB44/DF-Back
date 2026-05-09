@@ -2,9 +2,14 @@ const express  = require('express');
 const Joi      = require('joi');
 const db       = require('../db');
 const authenticate = require('../middleware/authenticate');
-const authorize    = require('../middleware/authorize');
 const validate     = require('../middleware/validate');
+const tenantScope  = require('../rbac/tenant-scope.middleware');
+const auditMw      = require('../audit/audit.middleware');
+const { requirePermission } = require('../rbac/require-permission.middleware');
+const P            = require('../rbac/permissions.constants');
 const { resolveClinicIdForOptionalAuth } = require('../helpers/public-clinic');
+
+const authAdmin = [authenticate, tenantScope, auditMw, requirePermission(P.CLINIC_SETTINGS)];
 
 const router = express.Router();
 
@@ -33,7 +38,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-router.post('/', authenticate, authorize('admin'), validate(createSchema), async (req, res, next) => {
+router.post('/', ...authAdmin, validate(createSchema), async (req, res, next) => {
   try {
     const result = await db.query(
       `INSERT INTO chairs (clinic_id, name) VALUES ($1, $2) RETURNING *`,
@@ -45,7 +50,7 @@ router.post('/', authenticate, authorize('admin'), validate(createSchema), async
   }
 });
 
-router.put('/:id', authenticate, authorize('admin'), validate(updateSchema), async (req, res, next) => {
+router.put('/:id', ...authAdmin, validate(updateSchema), async (req, res, next) => {
   try {
     const { name, is_active } = req.body;
     const result = await db.query(
@@ -59,7 +64,7 @@ router.put('/:id', authenticate, authorize('admin'), validate(updateSchema), asy
   }
 });
 
-router.delete('/:id', authenticate, authorize('admin'), async (req, res, next) => {
+router.delete('/:id', ...authAdmin, async (req, res, next) => {
   try {
     const conflict = await db.query(
       `SELECT id FROM appointments

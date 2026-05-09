@@ -1,5 +1,5 @@
 require('dotenv').config();
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 const { pool } = require('../src/db');
 
@@ -31,6 +31,44 @@ async function isAlreadyApplied(client, file) {
   if (file === '003_rx_tables.sql') {
     return tableExists(client, 'prescriptions');
   }
+  if (file === '004_rx_clinic_scope.sql') {
+    return columnExists(client, 'rx_medicines', 'clinic_id');
+  }
+  if (file === '005_clinic_logo_doctor_designation.sql') {
+    return columnExists(client, 'users', 'designation');
+  }
+  if (file === '006_allow_multiple_prescriptions_per_appointment.sql') {
+    // 006 drops a unique constraint — re-running is safe (DROP CONSTRAINT IF EXISTS)
+    // Skip if the constraint is already gone
+    const { rows } = await client.query(
+      `SELECT 1 FROM information_schema.table_constraints
+       WHERE table_schema='public' AND table_name='prescriptions'
+         AND constraint_name='prescriptions_appointment_id_key'`
+    );
+    return rows.length === 0; // already gone = already applied
+  }
+  if (file === '007_appointments_indexes.sql') {
+    // 007 only creates indexes — safe to re-run (IF NOT EXISTS), but skip if already done
+    const { rows } = await client.query(
+      `SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='idx_appts_clinic_scheduled_status'`
+    );
+    return rows.length > 0;
+  }
+  if (file === '008_rbac_core.sql') {
+    return tableExists(client, 'permissions');
+  }
+  if (file === '009_tenant_org_scope.sql') {
+    return columnExists(client, 'patients', 'org_id');
+  }
+  if (file === '010_drop_uq_rx_appointment_index.sql') {
+    const { rows } = await client.query(
+      `SELECT 1 FROM pg_indexes WHERE schemaname='public' AND indexname='uq_rx_appointment'`
+    );
+    return rows.length === 0;
+  }
+  if (file === '011_activity_log.sql') {
+    return columnExists(client, 'activity_log', 'clinic_id');
+  }
   return false;
 }
 
@@ -50,9 +88,22 @@ async function main() {
       }
 
       const sqlPath = path.join(migrationsDir, file);
-      const sql = fs.readFileSync(sqlPath, 'utf8');
-      await client.query(sql);
-      console.log('Migration applied:', sqlPath);
+      const sql     = fs.readFileSync(sqlPath, 'utf8');
+
+      // Run each migration atomically — on error the whole migration rolls back,
+      // leaving no partial state for the next run to trip over.
+      await client.query('BEGIN');
+      try {
+        await client.query(sql);
+        await client.query('COMMIT');
+        console.log('Migration applied:', file);
+      } catch (err) {
+        await client.query('ROLLBACK');
+        throw Object.assign(
+          new Error(`Migration ${file} failed: ${err.message}`),
+          { cause: err }
+        );
+      }
     }
   } finally {
     client.release();
@@ -61,6 +112,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error(err.message);
   process.exit(1);
 });
