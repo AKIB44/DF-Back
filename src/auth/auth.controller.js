@@ -2,6 +2,8 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const db     = require('../db');
 const { signTokens, verifyRefresh, hashToken, decodeExp } = require('./jwt.service');
+const { checkIsOrgAdmin, getAvailableClinics } = require('./auth.helpers');
+const { issueMfaToken } = require('./mfa.controller');
 const { bumpVersion } = require('../rbac/permission.cache');
 const { sendOtp }     = require('../services/fast2sms');
 
@@ -23,15 +25,22 @@ function normalizeEmail(s) {
   return String(s).trim().toLowerCase().normalize('NFKC').replace(/[​-‍﻿]/g, '');
 }
 
-async function getAvailableClinics(userId) {
+// Blocks login when the user's clinic is inactive.
+// isOrgAdmin flag is resolved once before this is called.
+async function assertClinicActive(user, isOrgAdmin) {
+  if (!user.clinic_id) return;   // no clinic assigned — org-level user
+  if (isOrgAdmin) return;        // org admins are never blocked by clinic status
+
   const { rows } = await db.query(
-    `SELECT DISTINCT clinic_id FROM user_roles
-     WHERE user_id = $1 AND clinic_id IS NOT NULL
-       AND (valid_to IS NULL OR valid_to > now())
-       AND valid_from <= now()`,
-    [userId]
+    `SELECT is_active FROM clinics WHERE id = $1`,
+    [user.clinic_id]
   );
-  return rows.map(r => r.clinic_id);
+  if (!rows.length || !rows[0].is_active) {
+    const err = new Error('clinic_inactive');
+    err.status = 403;
+    err.code   = 'clinic_inactive';
+    throw err;
+  }
 }
 
 async function login(req, res, next) {
@@ -59,6 +68,15 @@ async function login(req, res, next) {
       return res.status(401).json({ error: 'Account inactive' });
     }
 
+    const isOrgAdmin = await checkIsOrgAdmin(user.id);
+    await assertClinicActive(user, isOrgAdmin);
+
+    // MFA gate — org admins with MFA enabled must complete TOTP challenge
+    if (user.mfa_enabled) {
+      const mfa_token = issueMfaToken(user.id);
+      return res.json({ mfa_required: true, mfa_token });
+    }
+
     await db.query(
       `UPDATE users SET last_login_at = now(), failed_login_count = 0 WHERE id = $1`,
       [user.id]
@@ -69,7 +87,7 @@ async function login(req, res, next) {
       availableClinics.push(user.clinic_id);
     }
 
-    const { access_token, refresh_token } = signTokens(user, availableClinics);
+    const { access_token, refresh_token } = signTokens(user, availableClinics, isOrgAdmin);
 
     await db.query(
       `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
@@ -122,12 +140,15 @@ async function refresh(req, res, next) {
     const user = rows[0];
     if (!user) return res.status(401).json({ error: 'User not found' });
 
+    const isOrgAdmin = await checkIsOrgAdmin(user.id);
+    await assertClinicActive(user, isOrgAdmin);
+
     const availableClinics = await getAvailableClinics(user.id);
     if (!availableClinics.includes(user.clinic_id) && user.clinic_id) {
       availableClinics.push(user.clinic_id);
     }
 
-    const { access_token, refresh_token: new_refresh } = signTokens(user, availableClinics);
+    const { access_token, refresh_token: new_refresh } = signTokens(user, availableClinics, isOrgAdmin);
 
     await db.query(
       `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
@@ -181,6 +202,12 @@ async function myPermissions(req, res, next) {
     const { resolvePermissions } = require('../rbac/permission.resolver');
     const clinicId = req.query.clinicId || req.context?.clinicId;
     const permissions = await resolvePermissions(req.user.sub, clinicId);
+
+    // Org admins always have org.manage regardless of clinic context.
+    if (req.user.is_org_admin) {
+      permissions['org.manage'] = { scope: 'org' };
+    }
+
     res.json({ permissions });
   } catch (err) {
     next(err);
@@ -200,7 +227,7 @@ async function switchClinic(req, res, next) {
     const { rows } = await db.query(`SELECT * FROM users WHERE id = $1`, [req.user.sub]);
     const user = { ...rows[0], clinic_id: clinicId };
 
-    const { access_token, refresh_token } = signTokens(user, available);
+    const { access_token, refresh_token } = signTokens(user, available, req.user.is_org_admin || false);
 
     await db.query(
       `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
@@ -381,6 +408,9 @@ async function verifyOtp(req, res, next) {
     const user = userRows[0];
     if (!user) return res.status(401).json({ error: 'User not found' });
 
+    const isOrgAdmin = await checkIsOrgAdmin(user.id);
+    await assertClinicActive(user, isOrgAdmin);
+
     await db.query(
       `UPDATE users SET last_login_at = now(), failed_login_count = 0 WHERE id = $1`,
       [user.id]
@@ -391,7 +421,7 @@ async function verifyOtp(req, res, next) {
       availableClinics.push(user.clinic_id);
     }
 
-    const { access_token, refresh_token } = signTokens(user, availableClinics);
+    const { access_token, refresh_token } = signTokens(user, availableClinics, isOrgAdmin);
 
     await db.query(
       `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)

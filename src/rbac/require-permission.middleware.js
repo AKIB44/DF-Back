@@ -5,6 +5,9 @@ function requirePermission(code, opts = {}) {
     // Platform admins bypass all permission checks
     if (req.user?.type === 'platform_admin') return next();
 
+    // Org admins have implicit org.manage permission — no clinic context required
+    if (req.user?.is_org_admin && code === 'org.manage') return next();
+
     const { userId, clinicId } = req.context || {};
     if (!userId || !clinicId) {
       return res.status(400).json({ error: 'no_active_clinic' });

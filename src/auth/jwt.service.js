@@ -5,7 +5,7 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-function signTokens(user, availableClinics) {
+function signTokens(user, availableClinics, isOrgAdmin = false) {
   const payload = {
     sub:               user.id,
     type:              'user',
@@ -14,6 +14,7 @@ function signTokens(user, availableClinics) {
     active_clinic_id:  user.clinic_id,
     available_clinics: availableClinics || [user.clinic_id],
     rv:                user.role_version || 1,
+    is_org_admin:      isOrgAdmin,
   };
 
   const access_token = jwt.sign(payload, process.env.JWT_SECRET, {

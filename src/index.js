@@ -16,6 +16,7 @@ app.use('/v1/auth', require('./auth/auth.routes'));
 
 // ── Domain routes ─────────────────────────────────────────────────────────────
 app.use('/v1/clinic',       require('./routes/clinic'));
+app.use('/v1/clinics',      require('./routes/clinics'));
 app.use('/v1/chairs',       require('./routes/chairs'));
 app.use('/v1/services',     require('./routes/services'));
 app.use('/v1/staff',        require('./routes/staff'));
@@ -24,6 +25,9 @@ app.use('/v1/appointments', require('./routes/appointments'));
 app.use('/v1/rx',           require('./routes/rx'));
 app.use('/v1/rbac',         require('./routes/rbac'));
 app.use('/v1/activity-log', require('./routes/activity-log'));
+app.use('/v1/org/hr',       require('./routes/org-hr'));
+app.use('/v1/org/accounts', require('./routes/org-accounts'));
+app.use('/v1/org/roles',    require('./routes/org-roles'));
 
 app.get('/health', (_, res) => res.json({ ok: true }));
 

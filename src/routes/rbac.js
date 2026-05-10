@@ -243,4 +243,14 @@ router.delete('/users/:id/overrides/:overrideId', async (req, res, next) => {
   }
 });
 
+// ── 8. List all defined permissions ──────────────────────────────────────────
+router.get('/permissions', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT code, module, action, description, is_sensitive FROM permissions ORDER BY module, action`
+    );
+    res.json({ permissions: rows });
+  } catch (err) { next(err); }
+});
+
 module.exports = router;

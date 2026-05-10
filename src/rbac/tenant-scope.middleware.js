@@ -3,7 +3,7 @@ module.exports = (req, res, next) => {
   if (!auth) return res.status(401).json({ error: 'unauthorized' });
 
   const clinicId = auth.active_clinic_id || auth.clinic_id;
-  if (!clinicId && auth.type !== 'platform_admin') {
+  if (!clinicId && auth.type !== 'platform_admin' && !auth.is_org_admin) {
     return res.status(400).json({ error: 'no_active_clinic' });
   }
 

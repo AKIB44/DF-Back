@@ -3,6 +3,7 @@ const Joi        = require('joi');
 const validate   = require('../middleware/validate');
 const authenticate = require('../middleware/authenticate');
 const ctrl       = require('./auth.controller');
+const mfaCtrl    = require('./mfa.controller');
 
 const router = express.Router();
 
@@ -33,5 +34,12 @@ router.post('/switch-clinic', authenticate,               ctrl.switchClinic);
 router.post('/step-up',       authenticate,               ctrl.stepUp);
 router.post('/otp/request',   validate(otpRequestSchema), ctrl.requestOtp);
 router.post('/otp/verify',    validate(otpVerifySchema),  ctrl.verifyOtp);
+
+// ── MFA ───────────────────────────────────────────────────────────────────────
+router.get('/mfa/status',    authenticate,               mfaCtrl.mfaStatus);
+router.post('/mfa/setup',    authenticate,               mfaCtrl.setupMfa);
+router.post('/mfa/enable',   authenticate,               mfaCtrl.enableMfa);
+router.post('/mfa/disable',  authenticate,               mfaCtrl.disableMfa);
+router.post('/mfa/challenge',                            mfaCtrl.challengeMfa);
 
 module.exports = router;

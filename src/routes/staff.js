@@ -21,6 +21,7 @@ const createSchema = Joi.object({
   role:        Joi.string().valid('admin', 'doctor', 'receptionist').required(),
   designation: Joi.string().max(100).optional().allow(''),
   password:    Joi.string().min(8).required(),
+  is_active:   Joi.boolean().optional(),
 });
 
 const updateSchema = Joi.object({
@@ -63,10 +64,10 @@ router.post('/', validate(createSchema), async (req, res, next) => {
 
     const password_hash = await bcrypt.hash(password, 12);
     const result = await db.query(
-      `INSERT INTO users (clinic_id, first_name, last_name, email, password_hash, role, designation)
-       VALUES ($1,$2,$3,$4,$5,$6,$7)
+      `INSERT INTO users (org_id, clinic_id, first_name, last_name, email, password_hash, role, designation)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING ${SAFE_COLS}`,
-      [req.user.clinic_id, first_name, last_name || '', email, password_hash, role, designation || null]
+      [req.context.orgId, req.user.clinic_id, first_name, last_name || '', email, password_hash, role, designation || null]
     );
 
     const newUser = result.rows[0];
@@ -88,6 +89,20 @@ router.post('/', validate(createSchema), async (req, res, next) => {
 router.put('/:id', validate(updateSchema), async (req, res, next) => {
   try {
     const { first_name, last_name, role, is_active } = req.body;
+
+    // Protect org admins — their role can only be changed via org-level RBAC management
+    if (role !== undefined) {
+      const { rows: orgAdminCheck } = await db.query(
+        `SELECT 1 FROM user_roles ur
+         JOIN roles r ON r.id = ur.role_id
+         WHERE ur.user_id = $1 AND r.code = 'org_admin'
+           AND (ur.valid_to IS NULL OR ur.valid_to > now()) LIMIT 1`,
+        [req.params.id]
+      );
+      if (orgAdminCheck.length) {
+        return res.status(403).json({ error: 'Cannot change role of an org admin via clinic staff management.' });
+      }
+    }
     const email =
       req.body.email === undefined
         ? undefined

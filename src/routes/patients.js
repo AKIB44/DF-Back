@@ -25,24 +25,36 @@ router.use(authenticate, tenantScope, auditMw);
 
 router.get('/', requirePermission(P.PATIENT_VIEW), async (req, res, next) => {
   try {
-    const { search, limit = 20 } = req.query;
-    const cap = Math.min(Number(limit) || 20, 100);
+    const { search, service_id, limit = 20 } = req.query;
+    const cap = Math.min(Number(limit) || 20, 200);
 
-    let result;
+    const params = [req.user.clinic_id];
+    let where = 'p.clinic_id = $1';
+    let idx = 2;
+
     if (search) {
-      result = await db.query(
-        `SELECT * FROM patients
-         WHERE clinic_id = $1
-           AND (name ILIKE '%' || $2 || '%' OR phone ILIKE '%' || $2 || '%')
-         ORDER BY name ASC LIMIT $3`,
-        [req.user.clinic_id, search, cap]
-      );
-    } else {
-      result = await db.query(
-        `SELECT * FROM patients WHERE clinic_id = $1 ORDER BY name ASC LIMIT $2`,
-        [req.user.clinic_id, cap]
-      );
+      where += ` AND (p.name ILIKE '%' || $${idx} || '%' OR p.phone ILIKE '%' || $${idx} || '%')`;
+      params.push(search); idx++;
     }
+
+    // Filter by service: only patients who have had at least one appointment for that service
+    let serviceJoin = '';
+    if (service_id) {
+      serviceJoin = `JOIN appointments ap_svc ON ap_svc.patient_id = p.id AND ap_svc.service_id = $${idx}`;
+      params.push(service_id); idx++;
+    }
+
+    params.push(cap);
+    const result = await db.query(
+      `SELECT DISTINCT p.*,
+         (SELECT a.scheduled_at FROM appointments a WHERE a.patient_id = p.id ORDER BY a.scheduled_at DESC LIMIT 1) AS last_visit,
+         (SELECT s.name FROM appointments a JOIN services s ON s.id = a.service_id WHERE a.patient_id = p.id ORDER BY a.scheduled_at DESC LIMIT 1) AS last_service
+       FROM patients p
+       ${serviceJoin}
+       WHERE ${where}
+       ORDER BY p.name ASC LIMIT $${idx}`,
+      params
+    );
     res.json({ patients: result.rows });
   } catch (err) {
     next(err);
@@ -83,17 +95,24 @@ router.get('/:id', requirePermission(P.PATIENT_VIEW), async (req, res, next) => 
     );
     if (!patResult.rows.length) return res.status(404).json({ error: 'Patient not found' });
 
+    const { service_id } = req.query;
+    const apptParams = [req.params.id];
+    let apptWhere = 'a.patient_id = $1';
+    if (service_id) {
+      apptParams.push(service_id);
+      apptWhere += ' AND a.service_id = $2';
+    }
+
     const apptResult = await db.query(
-      `SELECT a.*, s.name AS service_name
+      `SELECT a.*, s.name AS service_name, s.id AS service_id
        FROM appointments a
        JOIN services s ON s.id = a.service_id
-       WHERE a.patient_id = $1
-       ORDER BY a.scheduled_at DESC
-       LIMIT 5`,
-      [req.params.id]
+       WHERE ${apptWhere}
+       ORDER BY a.scheduled_at DESC`,
+      apptParams
     );
 
-    res.json({ patient: patResult.rows[0], recent_appointments: apptResult.rows });
+    res.json({ patient: patResult.rows[0], appointments: apptResult.rows });
   } catch (err) {
     next(err);
   }
