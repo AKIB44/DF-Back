@@ -23,6 +23,8 @@ const P = {
   CLINIC_SETTINGS: 'clinic.settings',
   AUDIT_VIEW:      'audit.view',
 
+  SERVICE_MANAGE_OWN: 'service.manage_own',
+
   ORG_MANAGE:      'org.manage',
   PLATFORM_MANAGE: 'platform.manage',
 };
