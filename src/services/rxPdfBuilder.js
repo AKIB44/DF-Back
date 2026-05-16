@@ -15,10 +15,15 @@ const C = {
 };
 
 // ─── Layout constants (A4 = 595 × 842 pt, margin 45) ─────────────────────────
-const PAGE_W  = 595;
-const PAGE_H  = 842;
-const MARGIN  = 45;
+const PAGE_W    = 595;
+const PAGE_H    = 842;
+const MARGIN    = 45;
 const CONTENT_W = PAGE_W - MARGIN * 2;   // 505 pt
+
+// Two-column item layout
+const COL_GAP = 14;
+const COL_W   = (CONTENT_W - COL_GAP) / 2;   // ≈ 245.5 pt each
+const R_X     = MARGIN + COL_W + COL_GAP;     // right-column x
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -73,25 +78,22 @@ async function buildQrBuffer(text) {
 
 async function renderHeader(doc, rx, logoBuffer, qrBuffer) {
   const TOP   = 45;
-  const BOX_H = 80;   // height reserved for logo / QR
-  const MID_X = MARGIN + BOX_H + 8;       // text start after logo
-  const MID_W = CONTENT_W - BOX_H * 2 - 16; // text width (centre block)
+  const BOX_H = 80;
+  const MID_X = MARGIN + BOX_H + 8;
+  const MID_W = CONTENT_W - BOX_H * 2 - 16;
 
-  // ── Logo top-left ──
   if (logoBuffer) {
     try {
       doc.image(logoBuffer, MARGIN, TOP, { fit: [BOX_H, BOX_H], align: 'center', valign: 'center' });
-    } catch (_) { /* silently skip broken image */ }
+    } catch (_) {}
   }
 
-  // ── QR code top-right ──
   if (qrBuffer) {
     try {
       doc.image(qrBuffer, PAGE_W - MARGIN - BOX_H, TOP, { width: BOX_H, height: BOX_H });
     } catch (_) {}
   }
 
-  // ── Clinic name — centred between logo and QR ──
   doc.font('Helvetica-Bold').fontSize(17).fillColor(C.TEAL)
      .text(rx.clinic_name || 'DentaFlow Clinic', MID_X, TOP + 2, {
        width: MID_W, align: 'center',
@@ -104,7 +106,6 @@ async function renderHeader(doc, rx, logoBuffer, qrBuffer) {
      .text(addrLine, MID_X, doc.y + 3, { width: MID_W, align: 'center' })
      .text(contLine, MID_X, doc.y + 2, { width: MID_W, align: 'center' });
 
-  // ── Doctor details — below QR, right-aligned ──
   const docName = [rx.doctor_first_name, rx.doctor_last_name].filter(Boolean).join(' ');
   const drY     = TOP + BOX_H + 4;
   doc.font('Helvetica-Bold').fontSize(8).fillColor(C.NAVY)
@@ -120,7 +121,7 @@ async function renderHeader(doc, rx, logoBuffer, qrBuffer) {
 }
 
 function renderPatientStrip(doc, rx, y) {
-  const RCOL = PAGE_W - MARGIN - 140; // right column x
+  const RCOL = PAGE_W - MARGIN - 140;
 
   doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.GRAY).text('PATIENT', MARGIN, y);
   doc.font('Helvetica-Bold').fontSize(10).fillColor(C.NAVY)
@@ -128,14 +129,12 @@ function renderPatientStrip(doc, rx, y) {
   doc.font('Helvetica').fontSize(8.5).fillColor(C.GRAY)
      .text(rx.patient_phone || '', MARGIN, doc.y + 1);
 
-  // Date & time — right side
   const dateStr = fmtDate(rx.created_at);
   const timeStr = fmtTime(rx.created_at);
   doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.GRAY).text('DATE', RCOL, y);
   doc.font('Helvetica').fontSize(9).fillColor(C.NAVY).text(dateStr, RCOL, doc.y + 2);
   doc.font('Helvetica').fontSize(8.5).fillColor(C.GRAY).text(timeStr, RCOL, doc.y + 2);
 
-  // Rx No — below date
   doc.font('Helvetica-Bold').fontSize(7.5).fillColor(C.MUTED)
      .text(`Rx No: ${rx.prescription_no}  ·  Valid: ${rx.valid_days} days`, RCOL, doc.y + 4);
 
@@ -151,57 +150,145 @@ function renderDiagnosis(doc, rx, y) {
     doc.font('Helvetica-Bold').fontSize(8.5).fillColor(C.GRAY).text('DIAGNOSIS', MARGIN, y);
     doc.font('Helvetica').fontSize(9.5).fillColor(C.NAVY)
        .text(rx.diagnosis, MARGIN, doc.y + 3, { width: CONTENT_W });
-    y = doc.y + 6;
+    y = doc.y + 4;
   }
 
   if (rx.clinical_notes) {
     doc.font('Helvetica-Bold').fontSize(8).fillColor(C.GRAY).text('CLINICAL NOTES', MARGIN, y);
     doc.font('Helvetica').fontSize(9).fillColor(C.NAVY)
        .text(rx.clinical_notes, MARGIN, doc.y + 3, { width: CONTENT_W });
-    y = doc.y + 6;
+    y = doc.y + 4;
   }
 
-  hline(doc, y + 4);
-  return y + 14;
+  hline(doc, y + 2);
+  return y + 10;
 }
+
+// ─── Two-column items layout ──────────────────────────────────────────────────
+// Medicines on the left, procedures on the right. Each column tracks its own y
+// so neither forces unnecessary vertical growth on the other side.
 
 function renderItems(doc, items, startY) {
   const medicines  = items.filter(i => i.item_type === 'medicine');
   const procedures = items.filter(i => i.item_type === 'procedure');
+  const twoCol     = medicines.length > 0 && procedures.length > 0;
+
+  // ── Single-column fallback (only one type of item) ────────────────────────
+  if (!twoCol) {
+    return renderItemsSingleCol(doc, medicines, procedures, startY);
+  }
+
+  // ── Two-column layout ─────────────────────────────────────────────────────
   let y = startY;
 
-  // ── Medicines ──
+  // "Rx" symbol — left side only, compact
+  doc.font('Helvetica-Bold').fontSize(16).fillColor(C.TEAL).text('Rx', MARGIN, y);
+  const rxBottom = doc.y + 2;
+
+  // Column headers
+  doc.font('Helvetica-Bold').fontSize(7.5).fillColor(C.GRAY)
+     .text('MEDICINES', MARGIN, rxBottom);
+  const leftHeaderBottom = doc.y + 4;
+
+  doc.font('Helvetica-Bold').fontSize(7.5).fillColor(C.GRAY)
+     .text('PROCEDURES', R_X, rxBottom);
+  const rightHeaderBottom = doc.y + 4;
+
+  let ly = leftHeaderBottom;
+  let ry = rightHeaderBottom;
+
+  const PAGE_BREAK_Y = PAGE_H - 130;
+
+  // Render medicines in left column
+  medicines.forEach((item, idx) => {
+    if (ly > PAGE_BREAK_Y) {
+      doc.addPage();
+      ly = MARGIN + 10;
+      ry = MARGIN + 10;
+    }
+
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.NAVY)
+       .text(`${idx + 1}.  ${medTitle(item)}`, MARGIN, ly, { width: COL_W });
+    ly = doc.y + 2;
+
+    const detail = medDetail(item);
+    if (detail) {
+      doc.font('Helvetica').fontSize(8).fillColor(C.GRAY)
+         .text(detail, MARGIN + 10, ly, { width: COL_W - 10 });
+      ly = doc.y + 2;
+    }
+    ly += 4;
+  });
+
+  // Render procedures in right column
+  procedures.forEach((item, idx) => {
+    if (ry > PAGE_BREAK_Y) {
+      doc.addPage();
+      ly = MARGIN + 10;
+      ry = MARGIN + 10;
+    }
+
+    doc.font('Helvetica-Bold').fontSize(9).fillColor(C.NAVY)
+       .text(`${idx + 1}.  ${procTitle(item)}`, R_X, ry, { width: COL_W });
+    ry = doc.y + 2;
+
+    const detail = procDetail(item);
+    if (detail) {
+      doc.font('Helvetica').fontSize(8).fillColor(C.GRAY)
+         .text(detail, R_X + 10, ry, { width: COL_W - 10 });
+      ry = doc.y + 2;
+    }
+    ry += 4;
+  });
+
+  // Thin vertical divider between columns
+  const divX   = MARGIN + COL_W + Math.floor(COL_GAP / 2);
+  const divTop = rxBottom;
+  const divBot = Math.max(ly, ry) - 4;
+  if (divBot > divTop) {
+    doc.save()
+       .moveTo(divX, divTop).lineTo(divX, divBot)
+       .strokeColor(C.LIGHT).lineWidth(0.5).stroke()
+       .restore();
+  }
+
+  return Math.max(ly, ry);
+}
+
+// Single-column fallback used when only medicines OR only procedures are present
+function renderItemsSingleCol(doc, medicines, procedures, startY) {
+  let y = startY;
+  const PAGE_BREAK_Y = PAGE_H - 130;
+
   if (medicines.length) {
-    // Large Rx symbol
-    doc.font('Helvetica-Bold').fontSize(26).fillColor(C.TEAL).text('Rx', MARGIN, y);
-    y = doc.y + 4;
+    doc.font('Helvetica-Bold').fontSize(16).fillColor(C.TEAL).text('Rx', MARGIN, y);
+    y = doc.y + 2;
 
     medicines.forEach((item, idx) => {
-      if (y > PAGE_H - 170) { doc.addPage(); y = MARGIN + 10; }
+      if (y > PAGE_BREAK_Y) { doc.addPage(); y = MARGIN + 10; }
 
-      doc.font('Helvetica-Bold').fontSize(9.5).fillColor(C.NAVY)
+      doc.font('Helvetica-Bold').fontSize(9).fillColor(C.NAVY)
          .text(`${idx + 1}.  ${medTitle(item)}`, MARGIN + 14, y, { width: CONTENT_W - 14 });
       y = doc.y + 2;
 
       const detail = medDetail(item);
       if (detail) {
-        doc.font('Helvetica').fontSize(8.5).fillColor(C.GRAY)
+        doc.font('Helvetica').fontSize(8).fillColor(C.GRAY)
            .text(detail, MARGIN + 24, y, { width: CONTENT_W - 24 });
         y = doc.y + 2;
       }
-      y += 6;
+      y += 4;
     });
   }
 
-  // ── Procedures ──
   if (procedures.length) {
-    if (y > PAGE_H - 170) { doc.addPage(); y = MARGIN + 10; }
+    if (y > PAGE_BREAK_Y) { doc.addPage(); y = MARGIN + 10; }
     y += 4;
     doc.font('Helvetica-Bold').fontSize(9).fillColor(C.NAVY).text('Procedures', MARGIN, y);
-    y = doc.y + 6;
+    y = doc.y + 4;
 
     procedures.forEach((item, idx) => {
-      if (y > PAGE_H - 170) { doc.addPage(); y = MARGIN + 10; }
+      if (y > PAGE_BREAK_Y) { doc.addPage(); y = MARGIN + 10; }
 
       doc.font('Helvetica-Bold').fontSize(9).fillColor(C.NAVY)
          .text(`${idx + 1}.  ${procTitle(item)}`, MARGIN + 14, y, { width: CONTENT_W - 14 });
@@ -209,11 +296,11 @@ function renderItems(doc, items, startY) {
 
       const detail = procDetail(item);
       if (detail) {
-        doc.font('Helvetica').fontSize(8.5).fillColor(C.GRAY)
+        doc.font('Helvetica').fontSize(8).fillColor(C.GRAY)
            .text(detail, MARGIN + 24, y, { width: CONTENT_W - 24 });
         y = doc.y + 2;
       }
-      y += 6;
+      y += 4;
     });
   }
 
@@ -226,9 +313,14 @@ function renderItems(doc, items, startY) {
 }
 
 function renderSignature(doc, rx, y) {
-  // Nudge to safe area above footer (footer occupies bottom 54 pt)
   const SIG_Y = PAGE_H - 120;
-  if (y < SIG_Y) y = SIG_Y;
+  if (y > SIG_Y) {
+    // Items pushed past the safe zone — signature goes on a new page
+    doc.addPage();
+    y = MARGIN + 10;
+  } else {
+    y = SIG_Y;
+  }
 
   hline(doc, y, C.LIGHT, 0.5);
   y += 12;
@@ -237,7 +329,6 @@ function renderSignature(doc, rx, y) {
   const sigLineX2 = PAGE_W - MARGIN;
   const sigLineY  = y + 38;
 
-  // Signature placeholder box
   doc.save()
      .rect(sigLineX1, y, 150, 40)
      .dash(3, { space: 3 })
@@ -247,7 +338,6 @@ function renderSignature(doc, rx, y) {
   doc.font('Helvetica').fontSize(7.5).fillColor(C.MUTED)
      .text('(Signature)', sigLineX1, y + 14, { width: 150, align: 'center' });
 
-  // Solid signature line
   doc.moveTo(sigLineX1, sigLineY).lineTo(sigLineX2, sigLineY)
      .strokeColor(C.GRAY).lineWidth(0.5).stroke();
 
@@ -265,13 +355,11 @@ function renderFooter(doc, rx) {
   const FOOTER_H = 38;
   const fy       = PAGE_H - FOOTER_H;
 
-  // Teal background strip — bleeds to page edges
   doc.save()
      .rect(0, fy, PAGE_W, FOOTER_H)
      .fill(C.TEAL_DARK)
      .restore();
 
-  // Thin accent line at top of footer
   doc.save()
      .moveTo(0, fy).lineTo(PAGE_W, fy)
      .strokeColor(C.TEAL).lineWidth(1.5).stroke()
