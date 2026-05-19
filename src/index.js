@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors    = require('cors');
 const logger  = require('./middleware/logger');
+const { initDatabase } = require('./db/startup');
 
 const app = express();
 // Trust the first proxy hop (nginx, ALB, Cloudflare) so req.ip reflects
@@ -40,6 +41,13 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: err.message || 'Internal server error' });
 });
 
-app.listen(process.env.PORT || 3000, () =>
-  console.log(`DentaFlow backend running on :${process.env.PORT || 3000}`)
-);
+const PORT = process.env.PORT || 3000;
+
+initDatabase()
+  .then(() => {
+    app.listen(PORT, () => console.log(`DentaFlow backend running on :${PORT}`));
+  })
+  .catch((err) => {
+    console.error('Failed to start:', err.message);
+    process.exit(1);
+  });

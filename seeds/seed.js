@@ -6,7 +6,13 @@ const db           = require('../src/db');
 /** Must match what clients send — bcrypt is case-sensitive (password123 ≠ Password123). */
 const SEED_PLAINTEXT_PASSWORD = 'Password123';
 
-async function seed() {
+async function seed({ force = false } = {}) {
+  const { rows: existing } = await db.query('SELECT COUNT(*)::int AS n FROM clinics');
+  if (existing[0].n > 0 && !force) {
+    console.log('Clinics already exist — skipping seed. Use db:sync from old DB or npm run seed with FORCE_SEED=1.');
+    return null;
+  }
+
   const clinicId = uuidv4();
 
   await db.query(
@@ -53,13 +59,17 @@ async function seed() {
   );
 }
 
-seed()
-  .catch(console.error)
-  .finally(async () => {
-    try {
-      await db.pool.end();
-    } catch (_) {
-      /* ignore */
-    }
-    process.exit();
-  });
+module.exports = { seed, SEED_PLAINTEXT_PASSWORD };
+
+if (require.main === module) {
+  seed({ force: process.env.FORCE_SEED === '1' })
+    .catch(console.error)
+    .finally(async () => {
+      try {
+        await db.pool.end();
+      } catch (_) {
+        /* ignore */
+      }
+      process.exit();
+    });
+}

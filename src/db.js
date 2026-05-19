@@ -6,8 +6,8 @@ const { Pool, types } = require('pg');
 types.setTypeParser(1184, val => val);
 types.setTypeParser(1114, val => val);
 
-function buildPoolConfig() {
-  const raw = process.env.DATABASE_URL || '';
+function buildPoolConfig(connectionStringOverride) {
+  const raw = connectionStringOverride ?? process.env.DATABASE_URL ?? '';
   // Full URI — must include postgresql:// or relative resolution uses host "base" (pg-connection-string quirk)
   if (/^postgres(ql)?:\/\//i.test(raw)) {
     return { connectionString: raw };
@@ -43,15 +43,53 @@ function applySslFromEnv(config) {
   }
 }
 
-const pool = new Pool(buildPoolConfig());
+const SESSION_TIMEZONE = 'Asia/Kolkata';
 
-// Set session timezone to IST for every new connection so all TIMESTAMPTZ
-// values are returned with +05:30 offset.
-pool.on('connect', client => {
-  client.query("SET timezone = 'Asia/Kolkata'").catch(() => {});
-});
+function withSessionTimezone(config) {
+  if (config.connectionString) {
+    const u = new URL(config.connectionString);
+    if (!u.searchParams.has('options')) {
+      u.searchParams.set('options', `-c timezone=${SESSION_TIMEZONE}`);
+    }
+    return { ...config, connectionString: u.toString() };
+  }
+  return { ...config, options: `-c timezone=${SESSION_TIMEZONE}` };
+}
+
+function createPool(connectionStringOverride) {
+  return new Pool(withSessionTimezone(buildPoolConfig(connectionStringOverride)));
+}
+
+const pool = createPool();
+
+function getConfigSummary() {
+  const config = buildPoolConfig();
+  if (config.connectionString) {
+    try {
+      const u = new URL(config.connectionString);
+      return {
+        host: u.hostname,
+        port: Number(u.port || 5432),
+        database: u.pathname.replace(/^\//, '') || '(default)',
+        user: u.username || '(default)',
+        ssl: !!config.ssl,
+      };
+    } catch {
+      return { host: '(uri)', port: 5432, database: '(configured)', user: '(configured)', ssl: false };
+    }
+  }
+  return {
+    host: config.host,
+    port: config.port,
+    database: config.database,
+    user: config.user,
+    ssl: !!config.ssl,
+  };
+}
 
 module.exports = {
   query: (text, params) => pool.query(text, params),
   pool,
+  createPool,
+  getConfigSummary,
 };

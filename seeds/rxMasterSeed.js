@@ -144,7 +144,13 @@ async function run() {
   console.log('\nRx master seed complete.');
 }
 
-run().catch(console.error).finally(async () => {
-  try { await db.pool.end(); } catch (_) {}
-  process.exit();
-});
+module.exports = { run, seedForClinic };
+
+if (require.main === module) {
+  run().catch(console.error).finally(async () => {
+    try {
+      await db.pool.end();
+    } catch (_) {}
+    process.exit();
+  });
+}
