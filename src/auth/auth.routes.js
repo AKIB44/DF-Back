@@ -7,10 +7,11 @@ const mfaCtrl    = require('./mfa.controller');
 
 const router = express.Router();
 
-const loginSchema = Joi.alternatives().try(
-  Joi.object({ email:    Joi.string().trim().email().required(), password: Joi.string().required() }),
-  Joi.object({ username: Joi.string().trim().email().required(), password: Joi.string().required() })
-);
+const loginSchema = Joi.object({
+  email:    Joi.string().trim().email(),
+  username: Joi.string().trim().email(),
+  password: Joi.string().required(),
+}).or('email', 'username');
 
 const otpRequestSchema = Joi.object({
   phone: Joi.string().pattern(/^\d{10}$/).required().messages({
