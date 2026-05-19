@@ -8,6 +8,8 @@
     "migrate": "node scripts/migrate.js",
     "db:reset": "node scripts/reset-db.js",
     "db:fresh": "node scripts/reset-db.js && node seeds/seed.js",
+    "db:sync": "node scripts/sync-from-source.js",
+    "db:provision": "node scripts/provision-db.js",
     "seed": "node seeds/seed.js",
     "seed:rx": "node seeds/rxMasterSeed.js"
   },
