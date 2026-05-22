@@ -104,6 +104,7 @@ async function login(req, res, next) {
         first_name:        user.first_name,
         last_name:         user.last_name,
         role:              user.role,
+        is_org_admin:      isOrgAdmin,
         clinic_id:         user.clinic_id,
         active_clinic_id:  user.clinic_id,
         org_id:            user.org_id,
