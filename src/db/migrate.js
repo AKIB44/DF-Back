@@ -75,6 +75,7 @@ const OWNER_REQUIRED = {
   '013_add_internal_booking_source.sql': 'appointments',
   '014_users_phone.sql': 'users',
   '015_patients_age_clinical_history.sql': 'patients',
+  '016_release_notes.sql': 'users',
 };
 
 async function assertCanRunMigration(client, file) {
@@ -96,6 +97,10 @@ async function assertCanRunMigration(client, file) {
     hint +=
       `\nAlternatively, apply once as ${owner || 'postgres'}:\n` +
       `  psql ... -f migrations/013_add_internal_booking_source.sql`;
+  }
+  if (file === '016_release_notes.sql') {
+    hint +=
+      `\n(FK to users needs ownership or REFERENCES — run scripts/admin-grant-app-ownership.sql as superuser.)`;
   }
 
   throw new Error(`Migration ${file} requires ownership of table "${table}" (owner: ${owner}).\n${hint}`);
@@ -157,6 +162,12 @@ async function isAlreadyApplied(client, file) {
   }
   if (file === '015_patients_age_clinical_history.sql') {
     return columnExists(client, 'patients', 'age');
+  }
+  if (file === '016_release_notes.sql') {
+    return (
+      tableExists(client, 'release_notes') &&
+      tableExists(client, 'user_release_acks')
+    );
   }
   return false;
 }

@@ -1,5 +1,6 @@
 const express  = require('express');
 const Joi      = require('joi');
+const bcrypt   = require('bcryptjs');
 const db       = require('../db');
 const authenticate          = require('../middleware/authenticate');
 const validate              = require('../middleware/validate');
@@ -18,6 +19,10 @@ const updateStaffSchema = Joi.object({
   designation: Joi.string().max(100).optional(),
   status_rbac: Joi.string().valid('active', 'disabled', 'locked').optional(),
 }).min(1);
+
+const resetPasswordSchema = Joi.object({
+  new_password: Joi.string().min(8).required(),
+});
 
 // ── GET /staff — list all staff in the org ───────────────────────────────────
 
@@ -134,6 +139,37 @@ router.patch('/staff/:id', ...authChain, requirePermission(P.ORG_MANAGE), valida
     );
 
     res.json({ ok: true, staff: rows[0] });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ── POST /staff/:id/reset-password — force-reset a user's password ───────────
+
+router.post('/staff/:id/reset-password', ...authChain, requirePermission(P.ORG_MANAGE), validate(resetPasswordSchema), async (req, res, next) => {
+  try {
+    const orgId = req.context.orgId;
+    if (!orgId) return res.status(400).json({ error: 'No org_id in token' });
+
+    const { id } = req.params;
+
+    const { rows: existing } = await db.query(
+      `SELECT id FROM users WHERE id = $1 AND org_id = $2`,
+      [id, orgId]
+    );
+    if (!existing.length) return res.status(404).json({ error: 'Staff member not found' });
+
+    const hash = await bcrypt.hash(req.body.new_password, 12);
+
+    await db.query(
+      `UPDATE users
+       SET password_hash = $1, failed_login_count = 0,
+           status_rbac = CASE WHEN status_rbac = 'locked' THEN 'active' ELSE status_rbac END
+       WHERE id = $2`,
+      [hash, id]
+    );
+
+    res.json({ ok: true });
   } catch (err) {
     next(err);
   }
