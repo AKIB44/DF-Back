@@ -79,6 +79,16 @@ async function uploadBuffer({
   return { bucket: getBucket(bucket), key: normalizeKey(key) };
 }
 
+async function getPresignedPutUrl({ key, bucket, contentType, expiresIn = 300 }) {
+  const command = new PutObjectCommand({
+    Bucket:      getBucket(bucket),
+    Key:         normalizeKey(key),
+    ContentType: contentType,
+    ServerSideEncryption: 'AES256',
+  });
+  return getSignedUrl(getS3Client(), command, { expiresIn });
+}
+
 async function getPresignedUrl({ key, bucket, expiresIn = DEFAULT_SIGNED_URL_TTL_SECONDS }) {
   const command = new GetObjectCommand({
     Bucket: getBucket(bucket),
@@ -123,6 +133,7 @@ function resetClientForTests() {
 module.exports = {
   buildPrescriptionPdfKey,
   deleteObject,
+  getPresignedPutUrl,
   getPresignedUrl,
   getS3Client,
   objectExists,

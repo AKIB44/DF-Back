@@ -76,6 +76,16 @@ const OWNER_REQUIRED = {
   '014_users_phone.sql': 'users',
   '015_patients_age_clinical_history.sql': 'patients',
   '016_release_notes.sql': 'users',
+  '017_clinical_session.sql': 'appointments',
+  '018_service_performed.sql': 'clinical_session',
+  '019_examination_diagnosis.sql': 'clinical_session',
+  '020_tooth_chart.sql': 'clinical_session',
+  '021_treatment_plan.sql': 'patients',
+  '022_service_plan_link.sql': 'service_performed',
+  '023_prescription_session_link.sql': 'prescriptions',
+  '024_session_attachments.sql':       'clinical_session',
+  '025_investigation_orders.sql':      'clinical_session',
+  '026_lab_orders.sql':               'service_performed',
 };
 
 async function assertCanRunMigration(client, file) {
@@ -168,6 +178,36 @@ async function isAlreadyApplied(client, file) {
       tableExists(client, 'release_notes') &&
       tableExists(client, 'user_release_acks')
     );
+  }
+  if (file === '017_clinical_session.sql') {
+    return tableExists(client, 'clinical_session');
+  }
+  if (file === '018_service_performed.sql') {
+    return tableExists(client, 'service_performed');
+  }
+  if (file === '019_examination_diagnosis.sql') {
+    return tableExists(client, 'examination');
+  }
+  if (file === '020_tooth_chart.sql') {
+    return tableExists(client, 'tooth_chart_snapshot');
+  }
+  if (file === '021_treatment_plan.sql') {
+    return tableExists(client, 'treatment_plan');
+  }
+  if (file === '022_service_plan_link.sql') {
+    return columnExists(client, 'service_performed', 'plan_item_id');
+  }
+  if (file === '023_prescription_session_link.sql') {
+    return columnExists(client, 'prescriptions', 'session_id');
+  }
+  if (file === '024_session_attachments.sql') {
+    return tableExists(client, 'session_attachments');
+  }
+  if (file === '025_investigation_orders.sql') {
+    return tableExists(client, 'investigation_order');
+  }
+  if (file === '026_lab_orders.sql') {
+    return tableExists(client, 'lab_order');
   }
   return false;
 }
