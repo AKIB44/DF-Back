@@ -85,7 +85,13 @@ const OWNER_REQUIRED = {
   '023_prescription_session_link.sql': 'prescriptions',
   '024_session_attachments.sql':       'clinical_session',
   '025_investigation_orders.sql':      'clinical_session',
-  '026_lab_orders.sql':               'service_performed',
+  '026_lab_orders.sql':                    'service_performed',
+  '027_inventory_base.sql':               'clinics',
+  '028_material_consumption.sql':         'service_performed',
+  '029_surgical_flags_consent.sql':       'services',
+  '030_preop_record.sql':                 'clinical_session',
+  '031_postop_record.sql':                'clinical_session',
+  '032_tpa_preauth.sql':                  'clinical_session',
 };
 
 async function assertCanRunMigration(client, file) {
@@ -208,6 +214,24 @@ async function isAlreadyApplied(client, file) {
   }
   if (file === '026_lab_orders.sql') {
     return tableExists(client, 'lab_order');
+  }
+  if (file === '027_inventory_base.sql') {
+    return tableExists(client, 'inventory_item');
+  }
+  if (file === '028_material_consumption.sql') {
+    return tableExists(client, 'material_consumption');
+  }
+  if (file === '029_surgical_flags_consent.sql') {
+    return tableExists(client, 'consent_record');
+  }
+  if (file === '030_preop_record.sql') {
+    return tableExists(client, 'preop_record');
+  }
+  if (file === '031_postop_record.sql') {
+    return tableExists(client, 'postop_record');
+  }
+  if (file === '032_tpa_preauth.sql') {
+    return tableExists(client, 'tpa_preauth');
   }
   return false;
 }

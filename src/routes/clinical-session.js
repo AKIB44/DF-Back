@@ -214,12 +214,37 @@ router.post(
 
       // Fetch service price from catalog
       const { rows: svcRows } = await db.query(
-        `SELECT id, name, price FROM services
-         WHERE id = $1 AND clinic_id = $2 AND is_active = true`,
+        `SELECT id, name, price, requires_consent, requires_preop, postop_required
+           FROM services
+          WHERE id = $1 AND clinic_id = $2 AND is_active = true`,
         [req.body.service_id, clinicId]
       );
       if (!svcRows.length) return next(createError(404, 'Service not found'));
       const svc = { ...svcRows[0], gst_applicable: false };
+
+      // ── T5.3 Surgical gating ──────────────────────────────────────────────
+      if (svc.requires_consent) {
+        const { rows: consentRows } = await db.query(
+          `SELECT id FROM consent_record
+            WHERE session_id=$1 AND (service_id=$2 OR service_id IS NULL)
+            LIMIT 1`,
+          [sessionId, req.body.service_id]
+        ).catch(() => ({ rows: [] }));
+        if (!consentRows.length) {
+          return next(createError(422, 'Informed consent is required before adding this service.'));
+        }
+      }
+      if (svc.requires_preop) {
+        const { rows: preopRows } = await db.query(
+          `SELECT id FROM preop_record
+            WHERE session_id=$1 AND is_complete=true
+            LIMIT 1`,
+          [sessionId]
+        ).catch(() => ({ rows: [] }));
+        if (!preopRows.length) {
+          return next(createError(422, 'Pre-operative checklist must be completed before adding this service.'));
+        }
+      }
 
       const basePrice   = parseFloat(svc.price);
       const discountPct = req.body.discount_pct || 0;
@@ -373,6 +398,72 @@ router.patch(
         }
       }
 
+      // ── Commit or return cart items (T4.2 / T4.3) — non-blocking ──────────
+      try {
+        const { rows: cartItems } = await db.query(
+          `SELECT mc.*, ii.is_implant, ii.name AS item_name,
+                  cs.patient_id
+             FROM material_consumption mc
+             JOIN inventory_item ii ON ii.id = mc.inventory_item_id
+             JOIN clinical_session cs ON cs.id = mc.session_id
+            WHERE mc.service_id=$1 AND mc.state='RESERVED'`,
+          [req.params.id]
+        );
+
+        if (cartItems.length) {
+          const client2 = await db.pool.connect();
+          try {
+            await client2.query('BEGIN');
+
+            if (req.body.status === 'COMPLETED' || req.body.status === 'PARTIAL') {
+              for (const item of cartItems) {
+                await client2.query(
+                  `UPDATE material_consumption SET state='COMMITTED', updated_at=now() WHERE id=$1`,
+                  [item.id]
+                );
+                await client2.query(
+                  `INSERT INTO stock_movement
+                     (movement_type, inventory_item_id, batch_id, clinic_id,
+                      direction, quantity, source_ref, source_type, actor_id)
+                   VALUES ('CONSUMPTION',$1,$2,$3,-1,$4,$5,'service_completion',$6)`,
+                  [item.inventory_item_id, item.batch_id, clinicId,
+                   item.quantity, item.service_id, userId]
+                );
+                if (item.is_implant) {
+                  await client2.query(
+                    `INSERT INTO patient_device_register
+                       (patient_id, session_id, service_id, consumption_id, clinic_id,
+                        inventory_item_id, item_name, lot_number, expiry_date, implanted_by, tooth_numbers)
+                     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+                    [item.patient_id, sp.session_id, req.params.id, item.id, clinicId,
+                     item.inventory_item_id, item.item_name, item.lot_number || null,
+                     item.expiry_date || null, userId, sp.tooth_numbers || null]
+                  );
+                }
+              }
+              await client2.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock`).catch(() =>
+                client2.query(`REFRESH MATERIALIZED VIEW current_stock`)
+              );
+            } else if (req.body.status === 'ABANDONED') {
+              await client2.query(
+                `UPDATE material_consumption SET state='RETURNED', updated_at=now()
+                  WHERE service_id=$1 AND state='RESERVED'`,
+                [req.params.id]
+              );
+            }
+
+            await client2.query('COMMIT');
+          } catch (cartErr) {
+            await client2.query('ROLLBACK');
+            throw cartErr;
+          } finally {
+            client2.release();
+          }
+        }
+      } catch (cartErr) {
+        console.error('[cart-commit] skipped:', cartErr.message);
+      }
+
       req.audit.write({
         entity_type: 'service_performed',
         entity_id:   req.params.id,
@@ -415,7 +506,8 @@ router.get(
 
 // ── POST /sessions/:id/end-treatment  (Endpoint 30 — basic seal) ─────────────
 const endTreatmentSchema = Joi.object({
-  variance_reason: Joi.string().allow('').optional(),
+  variance_reason:  Joi.string().allow('').optional(),
+  patient_ack_at:   Joi.string().isoDate().allow(null).optional(),
 });
 
 router.post(
@@ -442,20 +534,91 @@ router.post(
         return next(createError(422, `${inProgress.length} service(s) still in progress — complete or abandon them first`));
       }
 
+      // ── T6.4 Variance check ───────────────────────────────────────────────
+      const VARIANCE_THRESHOLD = 0.15; // 15%
+      const { rows: chargeRows } = await db.query(
+        `SELECT COALESCE(SUM(final_charge),0) AS final_total
+           FROM service_performed
+          WHERE session_id=$1 AND status IN ('COMPLETED','PARTIAL') AND deleted_at IS NULL`,
+        [sessionId]
+      );
+      const { rows: estimateRows } = await db.query(
+        `SELECT COALESCE(SUM(tpi.cost_min),0) AS accepted_estimate
+           FROM treatment_plan_item tpi
+           JOIN treatment_plan tp ON tp.id = tpi.plan_id
+          WHERE tp.patient_id = $1
+            AND tpi.status IN ('ACCEPTED','IN_PROGRESS','DONE','PARTIAL')
+            AND tpi.deleted_at IS NULL`,
+        [session.patient_id]
+      );
+      const finalTotal       = parseFloat(chargeRows[0].final_total);
+      const acceptedEstimate = parseFloat(estimateRows[0].accepted_estimate);
+      const varianceFlag     = acceptedEstimate > 0 && finalTotal > acceptedEstimate * (1 + VARIANCE_THRESHOLD);
+      if (varianceFlag && !req.body.variance_reason) {
+        return next(createError(422, `Variance alert: charges (₹${finalTotal.toFixed(2)}) exceed accepted estimate (₹${acceptedEstimate.toFixed(2)}) by more than ${VARIANCE_THRESHOLD * 100}%. Provide a variance_reason.`));
+      }
+
       const sealed = await withTx(async (client) => {
         const { rows: sessRows } = await client.query(
           `UPDATE clinical_session
-           SET status      = 'COMPLETED',
-               sealed_at   = NOW(),
-               sealed_by   = $1,
-               ended_at    = NOW(),
-               updated_at  = NOW(),
-               updated_by  = $1,
-               variance_reason = $4
+           SET status          = 'COMPLETED',
+               sealed_at       = NOW(),
+               sealed_by       = $1,
+               ended_at        = NOW(),
+               updated_at      = NOW(),
+               updated_by      = $1,
+               variance_reason = $4,
+               patient_ack_at  = $6
            WHERE id = $2 AND org_id = $3 AND clinic_id = $5 AND deleted_at IS NULL
            RETURNING *`,
-          [userId, sessionId, orgId, req.body.variance_reason || null, clinicId]
+          [userId, sessionId, orgId, req.body.variance_reason || null, clinicId,
+           req.body.patient_ack_at || null]
         );
+
+        // T4.3 — commit any remaining RESERVED cart items for completed/partial services
+        const { rows: reservedItems } = await client.query(
+          `SELECT mc.*, ii.is_implant, ii.name AS item_name, cs.patient_id,
+                  sp.tooth_numbers
+             FROM material_consumption mc
+             JOIN inventory_item ii ON ii.id = mc.inventory_item_id
+             JOIN clinical_session cs ON cs.id = mc.session_id
+             JOIN service_performed sp ON sp.id = mc.service_id
+            WHERE mc.session_id = $1 AND mc.state = 'RESERVED'`,
+          [sessionId]
+        );
+
+        for (const item of reservedItems) {
+          await client.query(
+            `UPDATE material_consumption SET state='COMMITTED', updated_at=now() WHERE id=$1`,
+            [item.id]
+          );
+          await client.query(
+            `INSERT INTO stock_movement
+               (movement_type, inventory_item_id, batch_id, clinic_id,
+                direction, quantity, source_ref, source_type, actor_id)
+             VALUES ('CONSUMPTION',$1,$2,$3,-1,$4,$5,'session_seal',$6)`,
+            [item.inventory_item_id, item.batch_id, clinicId,
+             item.quantity, item.service_id, userId]
+          );
+          if (item.is_implant) {
+            await client.query(
+              `INSERT INTO patient_device_register
+                 (patient_id, session_id, service_id, consumption_id, clinic_id,
+                  inventory_item_id, item_name, lot_number, expiry_date, implanted_by, tooth_numbers)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+               ON CONFLICT DO NOTHING`,
+              [item.patient_id, sessionId, item.service_id, item.id, clinicId,
+               item.inventory_item_id, item.item_name, item.lot_number || null,
+               item.expiry_date || null, userId, item.tooth_numbers || null]
+            );
+          }
+        }
+
+        if (reservedItems.length) {
+          await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock`).catch(() =>
+            client.query(`REFRESH MATERIALIZED VIEW current_stock`)
+          );
+        }
 
         // Transition appointment to done (billing handled separately by reception)
         await client.query(
@@ -860,6 +1023,7 @@ router.get('/sessions/:id/prescriptions', ...authChain, async (req, res, next) =
       `SELECT
          p.id, p.prescription_no, p.diagnosis AS indication,
          p.clinical_notes AS instructions, p.created_at,
+         p.pdf_generated,
          COALESCE(
            json_agg(
              json_build_object(
@@ -871,6 +1035,7 @@ router.get('/sessions/:id/prescriptions', ...authChain, async (req, res, next) =
                'dosage',       li.dosage,
                'frequency',    li.frequency,
                'duration',     li.duration,
+               'quantity',     li.quantity,
                'instructions', li.instructions
              ) ORDER BY li.sort_order
            ) FILTER (WHERE li.id IS NOT NULL),
@@ -962,6 +1127,7 @@ router.post(
         `SELECT
            p.id, p.prescription_no, p.diagnosis AS indication,
            p.clinical_notes AS instructions, p.created_at,
+           p.pdf_generated,
            COALESCE(
              json_agg(
                json_build_object(
@@ -973,6 +1139,7 @@ router.post(
                  'dosage',       li.dosage,
                  'frequency',    li.frequency,
                  'duration',     li.duration,
+                 'quantity',     li.quantity,
                  'instructions', li.instructions
                ) ORDER BY li.sort_order
              ) FILTER (WHERE li.id IS NOT NULL),
@@ -1213,6 +1380,179 @@ router.post(
       });
 
       return res.json({ upload_url: uploadUrl, s3_key: s3Key });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── Materials Cart (T4.2) ─────────────────────────────────────────────────────
+
+const cartAddSchema = Joi.object({
+  service_id:        Joi.string().uuid().required(),
+  inventory_item_id: Joi.string().uuid().required(),
+  batch_id:          Joi.string().uuid().allow(null).optional(),
+  quantity:          Joi.number().positive().required(),
+  unit:              Joi.string().max(20).required(),
+  lot_number:        Joi.string().max(100).allow('', null).optional(),
+  expiry_date:       Joi.string().isoDate().allow(null).optional(),
+  scanned:           Joi.boolean().optional(),
+});
+
+const cartPatchSchema = Joi.object({
+  quantity:    Joi.number().positive().optional(),
+  lot_number:  Joi.string().max(100).allow('', null).optional(),
+  expiry_date: Joi.string().isoDate().allow(null).optional(),
+  scanned:     Joi.boolean().optional(),
+  batch_id:    Joi.string().uuid().allow(null).optional(),
+});
+
+// helper: full cart rows with item details
+async function cartWithDetails(sessionId, clinicId) {
+  const { rows } = await db.query(
+    `SELECT mc.*,
+            ii.name        AS item_name,
+            ii.category    AS item_category,
+            ii.is_implant,
+            ii.is_traceable
+       FROM material_consumption mc
+       JOIN inventory_item ii ON ii.id = mc.inventory_item_id
+      WHERE mc.session_id = $1 AND mc.clinic_id = $2
+      ORDER BY mc.created_at ASC`,
+    [sessionId, clinicId]
+  );
+  return rows;
+}
+
+// GET /sessions/:id/cart
+router.get(
+  '/sessions/:id/cart',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  async (req, res, next) => {
+    try {
+      const { id: sessionId } = req.params;
+      const { clinicId } = req.context;
+
+      const session = await db.query(
+        `SELECT id FROM clinical_session WHERE id=$1 AND clinic_id=$2`,
+        [sessionId, clinicId]
+      );
+      if (!session.rows[0]) return next(createError(404, 'Session not found'));
+
+      return res.json({ cart: await cartWithDetails(sessionId, clinicId) });
+    } catch (err) { next(err); }
+  }
+);
+
+// POST /sessions/:id/cart
+router.post(
+  '/sessions/:id/cart',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  validate(cartAddSchema),
+  async (req, res, next) => {
+    try {
+      const { id: sessionId } = req.params;
+      const { clinicId, userId } = req.context;
+      const { service_id, inventory_item_id, batch_id, quantity, unit, lot_number, expiry_date, scanned } = req.body;
+
+      const session = await db.query(
+        `SELECT id, sealed_at FROM clinical_session WHERE id=$1 AND clinic_id=$2`,
+        [sessionId, clinicId]
+      );
+      if (!session.rows[0]) return next(createError(404, 'Session not found'));
+      if (session.rows[0].sealed_at) return next(createError(409, 'Session is sealed'));
+
+      const svc = await db.query(
+        `SELECT id FROM service_performed WHERE id=$1 AND session_id=$2 AND clinic_id=$3`,
+        [service_id, sessionId, clinicId]
+      );
+      if (!svc.rows[0]) return next(createError(404, 'Service not found in session'));
+
+      const { rows } = await db.query(
+        `INSERT INTO material_consumption
+           (session_id, service_id, clinic_id, inventory_item_id, batch_id,
+            quantity, unit, lot_number, expiry_date, scanned, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         RETURNING *`,
+        [sessionId, service_id, clinicId, inventory_item_id, batch_id || null,
+         quantity, unit, lot_number || null, expiry_date || null,
+         scanned ?? false, userId]
+      );
+
+      const [full] = await cartWithDetails(sessionId, clinicId);
+      // Return just the newly created item enriched with item details
+      const allCart = await cartWithDetails(sessionId, clinicId);
+      const newItem = allCart.find(r => r.id === rows[0].id);
+      return res.status(201).json({ cart_item: newItem });
+    } catch (err) { next(err); }
+  }
+);
+
+// PATCH /sessions/:id/cart/:itemId — update qty/lot/batch while still RESERVED
+router.patch(
+  '/sessions/:id/cart/:itemId',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  validate(cartPatchSchema),
+  async (req, res, next) => {
+    try {
+      const { id: sessionId, itemId } = req.params;
+      const { clinicId } = req.context;
+
+      const existing = await db.query(
+        `SELECT id, state FROM material_consumption
+          WHERE id=$1 AND session_id=$2 AND clinic_id=$3`,
+        [itemId, sessionId, clinicId]
+      );
+      if (!existing.rows[0]) return next(createError(404, 'Cart item not found'));
+      if (existing.rows[0].state !== 'RESERVED') {
+        return next(createError(409, 'Can only update RESERVED cart items'));
+      }
+
+      const fields = [];
+      const values = [];
+      let i = 1;
+      for (const key of ['quantity','lot_number','expiry_date','scanned','batch_id']) {
+        if (req.body[key] !== undefined) {
+          fields.push(`${key}=$${i++}`);
+          values.push(req.body[key]);
+        }
+      }
+      if (!fields.length) return next(createError(400, 'No fields to update'));
+      fields.push(`updated_at=now()`);
+      values.push(itemId, sessionId, clinicId);
+
+      await db.query(
+        `UPDATE material_consumption SET ${fields.join(',')}
+          WHERE id=$${i} AND session_id=$${i+1} AND clinic_id=$${i+2}`,
+        values
+      );
+
+      const allCart = await cartWithDetails(sessionId, clinicId);
+      const updated = allCart.find(r => r.id === itemId);
+      return res.json({ cart_item: updated });
+    } catch (err) { next(err); }
+  }
+);
+
+// DELETE /sessions/:id/cart/:itemId — remove RESERVED item (pre-commit)
+router.delete(
+  '/sessions/:id/cart/:itemId',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  async (req, res, next) => {
+    try {
+      const { id: sessionId, itemId } = req.params;
+      const { clinicId } = req.context;
+
+      const { rows } = await db.query(
+        `DELETE FROM material_consumption
+          WHERE id=$1 AND session_id=$2 AND clinic_id=$3 AND state='RESERVED'
+          RETURNING id`,
+        [itemId, sessionId, clinicId]
+      );
+      if (!rows[0]) return next(createError(404, 'Cart item not found or already committed'));
+      return res.json({ removed: true });
     } catch (err) { next(err); }
   }
 );
@@ -1500,6 +1840,664 @@ router.delete(
       } catch (_) { /* S3 delete is best-effort; DB record is already removed */ }
 
       return res.json({ deleted: true });
+    } catch (err) { next(err); }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T6 — EDGE CASES
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── POST /sessions/:id/pause  (Endpoint 27 — EC-2) ───────────────────────────
+router.post(
+  '/sessions/:id/pause',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, req.params.id);
+      if (!session) return next(createError(404, 'Session not found'));
+      if (session.sealed_at) return next(createError(409, 'Session is sealed'));
+      if (session.status === 'PAUSED') return next(createError(409, 'Session already paused'));
+      if (['COMPLETED', 'ABANDONED'].includes(session.status)) {
+        return next(createError(409, 'Cannot pause a completed or abandoned session'));
+      }
+
+      const { rows } = await db.query(
+        `UPDATE clinical_session
+         SET status = 'PAUSED', updated_at = NOW(), updated_by = $1
+         WHERE id = $2 AND org_id = $3 AND clinic_id = $4
+         RETURNING *`,
+        [userId, req.params.id, orgId, clinicId]
+      );
+
+      req.audit.write({ entity_type: 'clinical_session', entity_id: req.params.id,
+        action: 'SESSION_PAUSED', details: { previous_status: session.status } });
+
+      return res.json({ session: rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /sessions/:id/resume  (Endpoint 28 — EC-2) ──────────────────────────
+router.post(
+  '/sessions/:id/resume',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, req.params.id);
+      if (!session) return next(createError(404, 'Session not found'));
+      if (session.status !== 'PAUSED') return next(createError(409, 'Session is not paused'));
+
+      const { rows } = await db.query(
+        `UPDATE clinical_session
+         SET status = 'PERFORMING_SERVICES', updated_at = NOW(), updated_by = $1
+         WHERE id = $2 AND org_id = $3 AND clinic_id = $4
+         RETURNING *`,
+        [userId, req.params.id, orgId, clinicId]
+      );
+
+      req.audit.write({ entity_type: 'clinical_session', entity_id: req.params.id,
+        action: 'SESSION_RESUMED', details: {} });
+
+      return res.json({ session: rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /sessions/:id/abandon  (Endpoint 29 — EC-1) ─────────────────────────
+const abandonSessionSchema = Joi.object({
+  end_reason: Joi.string().valid('medical', 'patient_request', 'equipment_failure', 'time', 'other').required(),
+  notes:      Joi.string().max(1000).allow('', null).optional(),
+  force:      Joi.boolean().default(false),
+});
+
+router.post(
+  '/sessions/:id/abandon',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  validate(abandonSessionSchema),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    const sessionId = req.params.id;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+      if (session.sealed_at) return next(createError(409, 'Session is sealed'));
+      if (session.status === 'ABANDONED') return next(createError(409, 'Session already abandoned'));
+
+      const { rows: inProgress } = await db.query(
+        `SELECT id, service_id FROM service_performed
+          WHERE session_id=$1 AND status='IN_PROGRESS' AND deleted_at IS NULL`,
+        [sessionId]
+      );
+
+      if (inProgress.length && !req.body.force) {
+        return next(createError(422, {
+          message: `${inProgress.length} service(s) still in progress. Send force=true to abandon them.`,
+          in_progress_count: inProgress.length,
+        }));
+      }
+
+      await withTx(async (client) => {
+        // Force-abandon any in-progress services
+        if (inProgress.length) {
+          await client.query(
+            `UPDATE service_performed
+             SET status='ABANDONED', abandon_reason='session_abandoned', updated_by=$1
+             WHERE session_id=$2 AND status='IN_PROGRESS' AND deleted_at IS NULL`,
+            [userId, sessionId]
+          );
+        }
+
+        // Return all RESERVED cart items
+        await client.query(
+          `UPDATE material_consumption SET state='RETURNED', updated_at=now()
+            WHERE session_id=$1 AND state='RESERVED'`,
+          [sessionId]
+        ).catch(() => {}); // non-blocking if inventory tables don't exist yet
+
+        await client.query(
+          `UPDATE clinical_session
+           SET status='ABANDONED', ended_at=NOW(), end_reason=$1,
+               updated_at=NOW(), updated_by=$2
+           WHERE id=$3 AND org_id=$4 AND clinic_id=$5`,
+          [req.body.end_reason, userId, sessionId, orgId, clinicId]
+        );
+
+        await client.query(
+          `UPDATE appointments SET status='cancelled', updated_at=NOW()
+           WHERE id=$1`,
+          [session.appointment_id]
+        );
+      });
+
+      req.audit.write({ entity_type: 'clinical_session', entity_id: sessionId,
+        action: 'SESSION_ABANDONED', details: { end_reason: req.body.end_reason, notes: req.body.notes } });
+
+      const { rows } = await db.query(`SELECT * FROM clinical_session WHERE id=$1`, [sessionId]);
+      return res.json({ session: rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /sessions/:id/reopen  (Endpoint 31 — EC-9) ──────────────────────────
+const REOPEN_WINDOW_MINUTES = 30;
+
+router.post(
+  '/sessions/:id/reopen',
+  ...authChain,
+  requirePermission(P.CLINIC_MANAGE),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    const sessionId = req.params.id;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+      if (!session.sealed_at) return next(createError(409, 'Session is not sealed'));
+
+      const sealedMs  = new Date(session.sealed_at).getTime();
+      const windowMs  = REOPEN_WINDOW_MINUTES * 60 * 1000;
+      if (Date.now() - sealedMs > windowMs) {
+        return next(createError(422, `Reopen window has expired (${REOPEN_WINDOW_MINUTES} min limit).`));
+      }
+
+      const { rows } = await db.query(
+        `UPDATE clinical_session
+         SET status     = 'PERFORMING_SERVICES',
+             sealed_at  = NULL,
+             sealed_by  = NULL,
+             updated_at = NOW(),
+             updated_by = $1
+         WHERE id=$2 AND org_id=$3 AND clinic_id=$4
+         RETURNING *`,
+        [userId, sessionId, orgId, clinicId]
+      );
+
+      await db.query(
+        `UPDATE appointments SET status='in_treatment', updated_at=NOW() WHERE id=$1`,
+        [session.appointment_id]
+      );
+
+      req.audit.write({ entity_type: 'clinical_session', entity_id: sessionId,
+        action: 'SESSION_REOPENED', details: { reopened_by: userId } });
+
+      return res.json({ session: rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── GET /sessions/:id/variance  (T6.4 — FE preflight check) ──────────────────
+router.get(
+  '/sessions/:id/variance',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  async (req, res, next) => {
+    const { orgId, clinicId } = req.context;
+    const sessionId = req.params.id;
+    const THRESHOLD = 0.15;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+
+      const { rows: cr } = await db.query(
+        `SELECT COALESCE(SUM(final_charge),0) AS final_total
+           FROM service_performed
+          WHERE session_id=$1 AND status IN ('COMPLETED','PARTIAL') AND deleted_at IS NULL`,
+        [sessionId]
+      );
+      const { rows: er } = await db.query(
+        `SELECT COALESCE(SUM(tpi.cost_min),0) AS accepted_estimate
+           FROM treatment_plan_item tpi
+           JOIN treatment_plan tp ON tp.id = tpi.plan_id
+          WHERE tp.patient_id=$1
+            AND tpi.status IN ('ACCEPTED','IN_PROGRESS','DONE','PARTIAL')
+            AND tpi.deleted_at IS NULL`,
+        [session.patient_id]
+      );
+
+      const finalTotal       = parseFloat(cr[0].final_total);
+      const acceptedEstimate = parseFloat(er[0].accepted_estimate);
+      const varianceFlag     = acceptedEstimate > 0 && finalTotal > acceptedEstimate * (1 + THRESHOLD);
+
+      return res.json({ final_total: finalTotal, accepted_estimate: acceptedEstimate,
+        variance_flag: varianceFlag, threshold_pct: THRESHOLD * 100 });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── GET /sessions/:id/tpa  ────────────────────────────────────────────────────
+router.get(
+  '/sessions/:id/tpa',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  async (req, res, next) => {
+    const { orgId, clinicId } = req.context;
+    try {
+      const { rows } = await db.query(
+        `SELECT * FROM tpa_preauth
+          WHERE session_id=$1 AND org_id=$2 AND clinic_id=$3
+          ORDER BY created_at DESC`,
+        [req.params.id, orgId, clinicId]
+      ).catch(() => ({ rows: [] }));
+      return res.json({ tpa: rows });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /sessions/:id/tpa  (T6.6) ────────────────────────────────────────────
+const tpaSchema = Joi.object({
+  insurer_name:      Joi.string().max(200).required(),
+  policy_number:     Joi.string().max(100).allow('', null).optional(),
+  preauth_number:    Joi.string().max(100).allow('', null).optional(),
+  approved_amount:   Joi.number().min(0).allow(null).optional(),
+  approved_services: Joi.array().items(Joi.object()).default([]),
+  copay_pct:         Joi.number().min(0).max(100).default(0),
+  copay_flat:        Joi.number().min(0).default(0),
+  status:            Joi.string().valid('PENDING','APPROVED','PARTIALLY_APPROVED','REJECTED','CANCELLED').default('PENDING'),
+  notes:             Joi.string().max(1000).allow('', null).optional(),
+});
+
+router.post(
+  '/sessions/:id/tpa',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  validate(tpaSchema),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    const sessionId = req.params.id;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+
+      const b = req.body;
+      const { rows } = await db.query(
+        `INSERT INTO tpa_preauth
+           (org_id, clinic_id, session_id, patient_id, insurer_name, policy_number,
+            preauth_number, approved_amount, approved_services, copay_pct, copay_flat,
+            status, notes, created_by, updated_by,
+            submitted_at, responded_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,
+                 ${b.status !== 'PENDING' ? 'now()' : 'NULL'},
+                 ${['APPROVED','PARTIALLY_APPROVED','REJECTED'].includes(b.status) ? 'now()' : 'NULL'})
+         RETURNING *`,
+        [orgId, clinicId, sessionId, session.patient_id, b.insurer_name, b.policy_number || null,
+         b.preauth_number || null, b.approved_amount ?? null, JSON.stringify(b.approved_services || []),
+         b.copay_pct || 0, b.copay_flat || 0, b.status, b.notes || null, userId]
+      );
+      return res.status(201).json({ tpa: rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── PATCH /tpa/:id  (T6.6 — update status/details) ───────────────────────────
+router.patch(
+  '/tpa/:id',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    try {
+      const allowed = ['status','preauth_number','approved_amount','approved_services',
+                       'copay_pct','copay_flat','notes','rejection_reason'];
+      const sets = []; const vals = [];
+      for (const key of allowed) {
+        if (req.body[key] !== undefined) {
+          sets.push(`${key} = $${vals.length + 1}`);
+          vals.push(key === 'approved_services' ? JSON.stringify(req.body[key]) : req.body[key]);
+        }
+      }
+      if (!sets.length) return next(createError(400, 'No fields to update'));
+      if (req.body.status && req.body.status !== 'PENDING') {
+        sets.push(`submitted_at = COALESCE(submitted_at, NOW())`);
+      }
+      if (['APPROVED','PARTIALLY_APPROVED','REJECTED'].includes(req.body.status)) {
+        sets.push(`responded_at = NOW()`);
+      }
+      sets.push(`updated_by = $${vals.length + 1}`, `updated_at = NOW()`);
+      vals.push(userId, req.params.id, orgId, clinicId);
+
+      const { rows } = await db.query(
+        `UPDATE tpa_preauth SET ${sets.join(', ')}
+          WHERE id=$${vals.length - 2} AND org_id=$${vals.length - 1} AND clinic_id=$${vals.length}
+          RETURNING *`,
+        vals
+      );
+      if (!rows.length) return next(createError(404, 'TPA record not found'));
+      return res.json({ tpa: rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// T5 — SURGICAL GATING
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── GET /sessions/:id/consents ─────────────────────────────────────────────────
+router.get(
+  '/sessions/:id/consents',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  async (req, res, next) => {
+    const { orgId, clinicId } = req.context;
+    try {
+      const { rows } = await db.query(
+        `SELECT cr.*, ct.title AS template_title, ct.body_html AS template_body
+           FROM consent_record cr
+           LEFT JOIN consent_template ct ON ct.id = cr.template_id
+          WHERE cr.session_id = $1 AND cr.org_id = $2 AND cr.clinic_id = $3
+          ORDER BY cr.signed_at ASC`,
+        [req.params.id, orgId, clinicId]
+      );
+      return res.json({ consents: rows });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /sessions/:id/consents/sign  (presign patient signature upload) ────────
+router.post(
+  '/sessions/:id/consents/sign',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  async (req, res, next) => {
+    const { s3Key, uploadUrl } = await s3Service.getPresignedPutUrl(
+      `consents/${req.params.id}/${Date.now()}_sig.png`,
+      'image/png',
+      300
+    );
+    return res.json({ upload_url: uploadUrl, s3_key: s3Key });
+  }
+);
+
+// ── POST /sessions/:id/consents  (Endpoint 13 — confirm consent after sig upload)
+const addConsentSchema = Joi.object({
+  procedure_type:        Joi.string().max(120).required(),
+  service_id:            Joi.string().uuid().optional(),
+  template_id:           Joi.string().uuid().optional(),
+  patient_signature_url: Joi.string().max(500).required(),
+  witness_signature_url: Joi.string().max(500).allow('', null).optional(),
+  is_minor:              Joi.boolean().default(false),
+  guardian_name:         Joi.string().max(200).allow('', null).optional(),
+  notes:                 Joi.string().max(2000).allow('', null).optional(),
+});
+
+router.post(
+  '/sessions/:id/consents',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  validate(addConsentSchema),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    const sessionId = req.params.id;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+      if (session.sealed_at) return next(createError(409, 'Session is sealed'));
+
+      // hash the s3 key as a lightweight integrity marker
+      const crypto = require('crypto');
+      const sigHash = crypto
+        .createHash('sha256')
+        .update(req.body.patient_signature_url)
+        .digest('hex');
+
+      const { rows } = await db.query(
+        `INSERT INTO consent_record
+           (org_id, clinic_id, session_id, patient_id, template_id, procedure_type,
+            service_id, patient_signature_url, witness_signature_url,
+            signature_hash, is_minor, guardian_name, signed_by, notes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         RETURNING *`,
+        [
+          orgId, clinicId, sessionId, session.patient_id,
+          req.body.template_id || null,
+          req.body.procedure_type,
+          req.body.service_id || null,
+          req.body.patient_signature_url,
+          req.body.witness_signature_url || null,
+          sigHash,
+          req.body.is_minor || false,
+          req.body.guardian_name || null,
+          userId,
+          req.body.notes || null,
+        ]
+      );
+
+      req.audit.write({
+        entity_type: 'consent_record',
+        entity_id:   rows[0].id,
+        action:      'CONSENT_SIGNED',
+        details:     { session_id: sessionId, procedure_type: req.body.procedure_type },
+      });
+
+      return res.status(201).json({ consent: rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── GET /consent-templates ─────────────────────────────────────────────────────
+router.get(
+  '/consent-templates',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  async (req, res, next) => {
+    const { orgId, clinicId } = req.context;
+    try {
+      const { rows } = await db.query(
+        `SELECT * FROM consent_template
+          WHERE clinic_id = $1 AND org_id = $2 AND is_active = true
+          ORDER BY procedure_type, version DESC`,
+        [clinicId, orgId]
+      );
+      return res.json({ templates: rows });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── GET /sessions/:id/preop ───────────────────────────────────────────────────
+router.get(
+  '/sessions/:id/preop',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  async (req, res, next) => {
+    const { orgId, clinicId } = req.context;
+    try {
+      const { rows } = await db.query(
+        `SELECT * FROM preop_record
+          WHERE session_id=$1 AND org_id=$2 AND clinic_id=$3`,
+        [req.params.id, orgId, clinicId]
+      );
+      return res.json({ preop: rows[0] || null });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /sessions/:id/preop  (Endpoint 14) ───────────────────────────────────
+const preopSchema = Joi.object({
+  bp_systolic:                  Joi.number().integer().min(50).max(300).allow(null).optional(),
+  bp_diastolic:                 Joi.number().integer().min(30).max(200).allow(null).optional(),
+  pulse:                        Joi.number().integer().min(20).max(300).allow(null).optional(),
+  spo2:                         Joi.number().min(50).max(100).allow(null).optional(),
+  temperature:                  Joi.number().min(30).max(45).allow(null).optional(),
+  blood_sugar:                  Joi.number().min(0).max(1000).allow(null).optional(),
+  inr_value:                    Joi.number().min(0).max(20).allow(null).optional(),
+  allergies_confirmed_at:       Joi.string().isoDate().allow(null).optional(),
+  medical_clearance_url:        Joi.string().max(500).allow('', null).optional(),
+  antibiotic_prophylaxis_given: Joi.boolean().default(false),
+  antibiotic_drug:              Joi.string().max(200).allow('', null).optional(),
+  antibiotic_dose:              Joi.string().max(100).allow('', null).optional(),
+  antibiotic_given_at:          Joi.string().isoDate().allow(null).optional(),
+  npo_hours:                    Joi.number().min(0).max(72).allow(null).optional(),
+  anaesthesia_plan:             Joi.string().valid('local', 'sedation', 'ga').default('local'),
+  anaesthesia_agent:            Joi.string().max(200).allow('', null).optional(),
+  anaesthesia_dose:             Joi.string().max(100).allow('', null).optional(),
+  surgical_site_marked:         Joi.boolean().default(false),
+  override_reason:              Joi.string().max(500).allow('', null).optional(),
+  is_complete:                  Joi.boolean().default(false),
+  notes:                        Joi.string().max(2000).allow('', null).optional(),
+});
+
+router.post(
+  '/sessions/:id/preop',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  validate(preopSchema),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    const sessionId = req.params.id;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+      if (session.sealed_at) return next(createError(409, 'Session is sealed'));
+
+      const b = req.body;
+      const completedAt = b.is_complete ? 'now()' : 'NULL';
+
+      const { rows } = await db.query(
+        `INSERT INTO preop_record
+           (org_id, clinic_id, session_id,
+            bp_systolic, bp_diastolic, pulse, spo2, temperature, blood_sugar, inr_value,
+            allergies_confirmed_at, medical_clearance_url,
+            antibiotic_prophylaxis_given, antibiotic_drug, antibiotic_dose, antibiotic_given_at,
+            npo_hours, anaesthesia_plan, anaesthesia_agent, anaesthesia_dose,
+            surgical_site_marked, override_reason, is_complete,
+            completed_at, completed_by, created_by, notes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,
+                 ${b.is_complete ? 'now()' : 'NULL'},$24,$24,$25)
+         ON CONFLICT (session_id) DO UPDATE SET
+           bp_systolic=$4, bp_diastolic=$5, pulse=$6, spo2=$7, temperature=$8,
+           blood_sugar=$9, inr_value=$10, allergies_confirmed_at=$11,
+           medical_clearance_url=$12, antibiotic_prophylaxis_given=$13,
+           antibiotic_drug=$14, antibiotic_dose=$15, antibiotic_given_at=$16,
+           npo_hours=$17, anaesthesia_plan=$18, anaesthesia_agent=$19, anaesthesia_dose=$20,
+           surgical_site_marked=$21, override_reason=$22, is_complete=$23,
+           completed_at=${b.is_complete ? 'now()' : 'preop_record.completed_at'},
+           completed_by=${b.is_complete ? '$24' : 'preop_record.completed_by'},
+           notes=$25, updated_at=now()
+         RETURNING *`,
+        [
+          orgId, clinicId, sessionId,
+          b.bp_systolic ?? null, b.bp_diastolic ?? null, b.pulse ?? null,
+          b.spo2 ?? null, b.temperature ?? null, b.blood_sugar ?? null, b.inr_value ?? null,
+          b.allergies_confirmed_at || null, b.medical_clearance_url || null,
+          b.antibiotic_prophylaxis_given || false,
+          b.antibiotic_drug || null, b.antibiotic_dose || null, b.antibiotic_given_at || null,
+          b.npo_hours ?? null, b.anaesthesia_plan || 'local',
+          b.anaesthesia_agent || null, b.anaesthesia_dose || null,
+          b.surgical_site_marked || false, b.override_reason || null,
+          b.is_complete || false,
+          userId,
+          b.notes || null,
+        ]
+      );
+
+      return res.status(201).json({ preop: rows[0] });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── GET /sessions/:id/postop ──────────────────────────────────────────────────
+router.get(
+  '/sessions/:id/postop',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  async (req, res, next) => {
+    const { orgId, clinicId } = req.context;
+    try {
+      const { rows } = await db.query(
+        `SELECT * FROM postop_record
+          WHERE session_id=$1 AND org_id=$2 AND clinic_id=$3`,
+        [req.params.id, orgId, clinicId]
+      );
+      return res.json({ postop: rows[0] || null });
+    } catch (err) { next(err); }
+  }
+);
+
+// ── POST /sessions/:id/postop  (Endpoint 25) ─────────────────────────────────
+const postopSchema = Joi.object({
+  complications:               Joi.array().items(Joi.object({
+    type:         Joi.string().max(200).required(),
+    severity:     Joi.string().valid('mild','moderate','severe').required(),
+    action_taken: Joi.string().max(500).allow('').optional(),
+  })).default([]),
+  suture_count:                Joi.number().integer().min(0).allow(null).optional(),
+  suture_type:                 Joi.string().valid('resorbable','non-resorbable').allow(null).optional(),
+  suture_removal_date:         Joi.string().isoDate().allow(null).optional(),
+  specimen_sent:               Joi.boolean().default(false),
+  specimen_lab_id:             Joi.string().max(200).allow('', null).optional(),
+  specimen_request_slip_no:    Joi.string().max(200).allow('', null).optional(),
+  specimen_expected_report_date: Joi.string().isoDate().allow(null).optional(),
+  recovery_vitals:             Joi.array().items(Joi.object({
+    time:    Joi.string().required(),
+    bp_sys:  Joi.number().integer().allow(null).optional(),
+    bp_dia:  Joi.number().integer().allow(null).optional(),
+    pulse:   Joi.number().integer().allow(null).optional(),
+    spo2:    Joi.number().allow(null).optional(),
+  })).default([]),
+  postop_instructions_given:   Joi.boolean().default(false),
+  postop_instructions_text:    Joi.string().max(5000).allow('', null).optional(),
+  patient_acknowledged_at:     Joi.string().isoDate().allow(null).optional(),
+  follow_up_date:              Joi.string().isoDate().allow(null).optional(),
+  follow_up_notes:             Joi.string().max(1000).allow('', null).optional(),
+  notes:                       Joi.string().max(2000).allow('', null).optional(),
+});
+
+router.post(
+  '/sessions/:id/postop',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  validate(postopSchema),
+  async (req, res, next) => {
+    const { orgId, clinicId, userId } = req.context;
+    const sessionId = req.params.id;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+      if (session.sealed_at) return next(createError(409, 'Session is sealed'));
+
+      const b = req.body;
+      const { rows } = await db.query(
+        `INSERT INTO postop_record
+           (org_id, clinic_id, session_id, complications, suture_count, suture_type,
+            suture_removal_date, specimen_sent, specimen_lab_id, specimen_request_slip_no,
+            specimen_expected_report_date, recovery_vitals, postop_instructions_given,
+            postop_instructions_text, patient_acknowledged_at, follow_up_date,
+            follow_up_notes, notes, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         ON CONFLICT (session_id) DO UPDATE SET
+           complications=$4, suture_count=$5, suture_type=$6, suture_removal_date=$7,
+           specimen_sent=$8, specimen_lab_id=$9, specimen_request_slip_no=$10,
+           specimen_expected_report_date=$11, recovery_vitals=$12,
+           postop_instructions_given=$13, postop_instructions_text=$14,
+           patient_acknowledged_at=$15, follow_up_date=$16, follow_up_notes=$17,
+           notes=$18, updated_at=now()
+         RETURNING *`,
+        [
+          orgId, clinicId, sessionId,
+          JSON.stringify(b.complications || []),
+          b.suture_count ?? null, b.suture_type || null, b.suture_removal_date || null,
+          b.specimen_sent || false, b.specimen_lab_id || null,
+          b.specimen_request_slip_no || null, b.specimen_expected_report_date || null,
+          JSON.stringify(b.recovery_vitals || []),
+          b.postop_instructions_given || false, b.postop_instructions_text || null,
+          b.patient_acknowledged_at || null, b.follow_up_date || null,
+          b.follow_up_notes || null, b.notes || null,
+          userId,
+        ]
+      );
+
+      req.audit.write({
+        entity_type: 'postop_record',
+        entity_id:   rows[0].id,
+        action:      'POSTOP_SAVED',
+        details:     { session_id: sessionId },
+      });
+
+      return res.status(201).json({ postop: rows[0] });
     } catch (err) { next(err); }
   }
 );

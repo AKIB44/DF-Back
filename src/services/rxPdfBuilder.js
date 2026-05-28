@@ -386,9 +386,13 @@ function renderFooter(doc, rx) {
 
 // ─── Main build function ──────────────────────────────────────────────────────
 
-async function build(rx, { logoBuffer } = {}) {
-  const qrText   = `${process.env.BOOKING_FORM_URL || 'https://dentaflow.app'}/rx/verify/${rx.prescription_no}`;
-  const qrBuffer = await buildQrBuffer(qrText);
+async function build(rx, { logoBuffer, qrBuffer: prebuiltQr } = {}) {
+  // Accept a pre-built QR buffer (generated in parallel by the caller) or build it now
+  const qrBuffer = prebuiltQr !== undefined
+    ? prebuiltQr
+    : await buildQrBuffer(
+        `${process.env.BOOKING_FORM_URL || 'https://dentaflow.app'}/rx/verify/${rx.prescription_no}`
+      );
 
   return new Promise((resolve, reject) => {
     const doc    = new PDFDocument({ size: 'A4', margin: MARGIN, autoFirstPage: true });
@@ -413,4 +417,4 @@ async function build(rx, { logoBuffer } = {}) {
   });
 }
 
-module.exports = { build };
+module.exports = { build, buildQrBuffer };

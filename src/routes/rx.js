@@ -489,72 +489,94 @@ router.put('/prescriptions/:id', ...authChain, requirePermission(P.PRESCRIPTION_
 
 // ─── PDF generation ───────────────────────────────────────────────────────────
 
+// In-process logo cache: avoids re-fetching the same clinic logo from S3 on
+// every PDF generation. Keyed by clinic_id, expires after 5 minutes.
+const _logoCache = new Map(); // clinic_id → { buffer: Buffer, expiresAt: number }
+const LOGO_TTL_MS = 5 * 60 * 1000;
+
+async function _fetchLogoBuffer(s3Key, clinicId) {
+  const cached = _logoCache.get(clinicId);
+  if (cached && cached.expiresAt > Date.now()) return cached.buffer;
+
+  try {
+    const { getS3Client } = require('../services/s3Service');
+    const { GetObjectCommand } = require('@aws-sdk/client-s3');
+    const resp = await getS3Client().send(new GetObjectCommand({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key:    s3Key,
+    }));
+    const chunks = [];
+    for await (const chunk of resp.Body) chunks.push(chunk);
+    const buffer = Buffer.concat(chunks);
+    _logoCache.set(clinicId, { buffer, expiresAt: Date.now() + LOGO_TTL_MS });
+    return buffer;
+  } catch {
+    return null; // logo failure must not block PDF
+  }
+}
+
 router.post('/prescriptions/:id/generate', ...authChain, requirePermission(P.PRESCRIPTION_SIGN), async (req, res, next) => {
   try {
-    const rxResult = await db.query(
-      `SELECT p.*,
-              pat.name         AS patient_name,
-              pat.phone        AS patient_phone,
-              u.first_name     AS doctor_first_name,
-              u.last_name      AS doctor_last_name,
-              u.designation    AS doctor_designation,
-              c.name           AS clinic_name,
-              c.phone          AS clinic_phone,
-              c.email          AS clinic_email,
-              c.address        AS clinic_address,
-              c.city           AS clinic_city,
-              c.logo_s3_key    AS clinic_logo_s3_key
-       FROM prescriptions p
-       JOIN patients pat ON pat.id = p.patient_id
-       JOIN users    u   ON u.id   = p.doctor_id
-       JOIN clinics  c   ON c.id   = p.clinic_id
-       WHERE p.id=$1 AND p.clinic_id=$2`,
-      [req.params.id, req.user.clinic_id]
-    );
+    // Fetch prescription + line items in parallel
+    const [rxResult, linesResult] = await Promise.all([
+      db.query(
+        `SELECT p.*,
+                pat.name         AS patient_name,
+                pat.phone        AS patient_phone,
+                u.first_name     AS doctor_first_name,
+                u.last_name      AS doctor_last_name,
+                u.designation    AS doctor_designation,
+                c.name           AS clinic_name,
+                c.phone          AS clinic_phone,
+                c.email          AS clinic_email,
+                c.address        AS clinic_address,
+                c.city           AS clinic_city,
+                c.logo_s3_key    AS clinic_logo_s3_key
+         FROM prescriptions p
+         JOIN patients pat ON pat.id = p.patient_id
+         JOIN users    u   ON u.id   = p.doctor_id
+         JOIN clinics  c   ON c.id   = p.clinic_id
+         WHERE p.id=$1 AND p.clinic_id=$2`,
+        [req.params.id, req.user.clinic_id]
+      ),
+      db.query(
+        `SELECT li.*,
+                m.generic_name AS medicine_name, m.brand_name, m.strength AS medicine_strength,
+                pr.procedure_name, pr.procedure_code, pr.default_notes
+         FROM rx_line_items li
+         LEFT JOIN rx_medicines  m  ON m.id  = li.ref_id AND li.item_type = 'medicine'
+         LEFT JOIN rx_procedures pr ON pr.id = li.ref_id AND li.item_type = 'procedure'
+         WHERE li.prescription_id=$1 AND li.is_deleted = false
+         ORDER BY li.sort_order ASC`,
+        [req.params.id]
+      ),
+    ]);
+
     if (!rxResult.rows.length) return res.status(404).json({ error: 'Prescription not found' });
     const prescription = rxResult.rows[0];
 
-    const linesResult = await db.query(
-      `SELECT li.*,
-              m.generic_name AS medicine_name, m.brand_name, m.strength AS medicine_strength,
-              pr.procedure_name, pr.procedure_code, pr.default_notes
-       FROM rx_line_items li
-       LEFT JOIN rx_medicines  m  ON m.id  = li.ref_id AND li.item_type = 'medicine'
-       LEFT JOIN rx_procedures pr ON pr.id = li.ref_id AND li.item_type = 'procedure'
-       WHERE li.prescription_id=$1 AND li.is_deleted = false
-       ORDER BY li.sort_order ASC`,
-      [req.params.id]
-    );
-
-    // Fetch logo buffer directly from S3 (no presigned URL roundtrip needed)
-    let logoBuffer = null;
-    if (prescription.clinic_logo_s3_key) {
-      try {
-        const { getS3Client } = require('../services/s3Service');
-        const { GetObjectCommand } = require('@aws-sdk/client-s3');
-        const resp = await getS3Client().send(new GetObjectCommand({
-          Bucket: process.env.AWS_S3_BUCKET,
-          Key:    prescription.clinic_logo_s3_key,
-        }));
-        const chunks = [];
-        for await (const chunk of resp.Body) chunks.push(chunk);
-        logoBuffer = Buffer.concat(chunks);
-      } catch (_) { /* logo fetch failure should not block PDF */ }
-    }
+    // Fetch logo (cached) and generate QR in parallel — both are independent of each other
+    const qrText = `${process.env.BOOKING_FORM_URL || 'https://dentaflow.app'}/rx/verify/${prescription.prescription_no}`;
+    const [logoBuffer, qrBuffer] = await Promise.all([
+      prescription.clinic_logo_s3_key
+        ? _fetchLogoBuffer(prescription.clinic_logo_s3_key, prescription.clinic_id)
+        : Promise.resolve(null),
+      rxPdfBuilder.buildQrBuffer(qrText),
+    ]);
 
     const pdfBuffer = await rxPdfBuilder.build(
       { ...prescription, line_items: linesResult.rows },
-      { logoBuffer }
+      { logoBuffer, qrBuffer }
     );
 
     const s3Key = buildPrescriptionPdfKey({
-      patientId:       prescription.patient_id,
-      prescriptionNo:  prescription.prescription_no,
+      patientId:      prescription.patient_id,
+      prescriptionNo: prescription.prescription_no,
     });
 
     await uploadBuffer({ key: s3Key, buffer: pdfBuffer, contentType: 'application/pdf', encrypt: true });
 
-    const updated = await db.query(
+    const dbResult = await db.query(
       `UPDATE prescriptions
        SET pdf_generated=true, pdf_generated_at=now(), pdf_s3_key=$3, updated_at=now()
        WHERE id=$1 AND clinic_id=$2
@@ -562,7 +584,13 @@ router.post('/prescriptions/:id/generate', ...authChain, requirePermission(P.PRE
       [req.params.id, req.user.clinic_id, s3Key]
     );
 
-    res.json({ message: 'PDF generated', prescription: updated.rows[0] });
+    // Generate presigned URL immediately — client no longer needs to poll
+    const url = await getPresignedUrl({
+      key:       s3Key,
+      expiresIn: Number(process.env.AWS_S3_SIGNED_URL_TTL_SECONDS || 900),
+    });
+
+    res.json({ url, prescription: dbResult.rows[0] });
   } catch (err) { next(err); }
 });
 

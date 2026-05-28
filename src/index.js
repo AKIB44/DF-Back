@@ -85,6 +85,7 @@ app.use('/v1/org/hr',       require('./routes/org-hr'));
 app.use('/v1/org/accounts', require('./routes/org-accounts'));
 app.use('/v1/org/roles',    require('./routes/org-roles'));
 app.use('/v1/release-notes', require('./routes/release-notes'));
+app.use('/v1',              require('./routes/inventory'));
 app.use('/v1',              require('./routes/clinical-session'));
 
 app.get('/health', (_, res) => res.json({ ok: true }));
