@@ -87,6 +87,133 @@ router.post('/', requirePermission(P.PATIENT_CREATE), validate(patientSchema), a
   }
 });
 
+// ── GET /:id/record — full patient record (sessions, plans, labs, billing) ────
+router.get('/:id/record', requirePermission(P.PATIENT_VIEW), async (req, res, next) => {
+  try {
+    const patientId = req.params.id;
+    const clinicId  = req.user.clinic_id;
+
+    const [patRes, apptRes, sessRes, planRes, labRes, billRes] = await Promise.all([
+      // patient
+      db.query(`SELECT * FROM patients WHERE id=$1 AND clinic_id=$2`, [patientId, clinicId]),
+
+      // appointments
+      db.query(
+        `SELECT a.*, s.name AS service_name, s.id AS service_id
+           FROM appointments a
+           JOIN services s ON s.id = a.service_id
+          WHERE a.patient_id = $1
+          ORDER BY a.scheduled_at DESC`,
+        [patientId]
+      ),
+
+      // clinical sessions with services performed + diagnoses (correlated subqueries avoid cartesian product)
+      db.query(
+        `SELECT
+           cs.id, cs.status, cs.started_at, cs.ended_at, cs.sealed_at,
+           TRIM(u.first_name || ' ' || u.last_name) AS doctor_name,
+           (
+             SELECT COALESCE(json_agg(jsonb_build_object(
+               'id', sp.id,
+               'service_name', svc.name,
+               'tooth_numbers', sp.tooth_numbers,
+               'quantity', sp.quantity,
+               'base_price', sp.base_price,
+               'final_charge', sp.final_charge,
+               'status', sp.status
+             ) ORDER BY sp.id), '[]')
+             FROM service_performed sp
+             LEFT JOIN services svc ON svc.id = sp.service_id
+             WHERE sp.session_id = cs.id
+           ) AS services_performed,
+           (
+             SELECT COALESCE(json_agg(jsonb_build_object(
+               'id', d.id,
+               'diagnosis_text', d.diagnosis_text,
+               'icd10_code', d.icd10_code,
+               'tooth_numbers', d.tooth_numbers
+             ) ORDER BY d.id), '[]')
+             FROM diagnosis d
+             WHERE d.session_id = cs.id
+           ) AS diagnoses,
+           COALESCE(
+             (SELECT SUM(sp2.final_charge) FROM service_performed sp2 WHERE sp2.session_id = cs.id),
+             0
+           ) AS session_charge
+         FROM clinical_session cs
+         LEFT JOIN users u ON u.id = cs.primary_doctor_id
+         WHERE cs.patient_id = $1 AND cs.clinic_id = $2
+         ORDER BY cs.started_at DESC`,
+        [patientId, clinicId]
+      ),
+
+      // treatment plans with items (treatment_plan has no status/notes columns)
+      db.query(
+        `SELECT
+           tp.id, tp.title, tp.created_at,
+           (
+             SELECT COALESCE(json_agg(jsonb_build_object(
+               'id', tpi.id,
+               'service_name', svc.name,
+               'cost_min', tpi.cost_min,
+               'cost_max', tpi.cost_max,
+               'status', tpi.status,
+               'priority', tpi.priority,
+               'tooth_numbers', tpi.tooth_numbers
+             ) ORDER BY tpi.id), '[]')
+             FROM treatment_plan_item tpi
+             LEFT JOIN services svc ON svc.id = tpi.service_id
+             WHERE tpi.plan_id = tp.id AND tpi.deleted_at IS NULL
+           ) AS items
+         FROM treatment_plan tp
+         WHERE tp.patient_id = $1 AND tp.clinic_id = $2 AND tp.deleted_at IS NULL
+         ORDER BY tp.created_at DESC`,
+        [patientId, clinicId]
+      ),
+
+      // lab orders (via session)
+      db.query(
+        `SELECT
+           lo.id, lo.status, lo.shade, lo.specifications,
+           lo.pickup_date, lo.expected_delivery_date, lo.lab_cost,
+           lo.created_at,
+           svc.name AS service_name,
+           cs.started_at AS session_date
+         FROM lab_order lo
+         JOIN clinical_session cs ON cs.id = lo.session_id
+         LEFT JOIN services svc ON svc.id = lo.service_id
+         WHERE cs.patient_id = $1 AND cs.clinic_id = $2
+         ORDER BY lo.created_at DESC`,
+        [patientId, clinicId]
+      ),
+
+      // billing summary
+      db.query(
+        `SELECT
+           COUNT(DISTINCT cs.id)::int                          AS session_count,
+           COALESCE(SUM(sp.final_charge), 0)                  AS total_billed,
+           COUNT(sp.id)                                        AS procedure_count
+         FROM clinical_session cs
+         LEFT JOIN service_performed sp ON sp.session_id = cs.id
+         WHERE cs.patient_id = $1 AND cs.clinic_id = $2`,
+        [patientId, clinicId]
+      ),
+    ]);
+
+    if (!patRes.rows.length) return res.status(404).json({ error: 'Patient not found' });
+
+    res.json({
+      patient:         patRes.rows[0],
+      appointments:    apptRes.rows,
+      sessions:        sessRes.rows,
+      treatment_plans: planRes.rows,
+      lab_orders:      labRes.rows,
+      billing:         billRes.rows[0],
+    });
+  } catch (err) { next(err); }
+});
+
+// ── GET /:id ──────────────────────────────────────────────────────────────────
 router.get('/:id', requirePermission(P.PATIENT_VIEW), async (req, res, next) => {
   try {
     const patResult = await db.query(

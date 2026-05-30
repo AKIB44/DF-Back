@@ -48,6 +48,8 @@ const authLimiter = rateLimit({
   standardHeaders:  true,
   legacyHeaders:    false,
   message:          { error: 'Too many login attempts. Please try again in 15 minutes.' },
+  // Skip rate-limiting entirely when running automated tests
+  skip: () => process.env.NODE_ENV === 'test',
 });
 app.use('/v1/auth/login',         authLimiter);
 app.use('/v1/auth/otp/request',   authLimiter);
