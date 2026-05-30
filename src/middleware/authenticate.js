@@ -1,4 +1,4 @@
-const { verifyAccess } = require('../auth/jwt.service');
+const { verifyAccess, SESSION_SECS } = require('../auth/jwt.service');
 const db = require('../db');
 
 module.exports = async (req, res, next) => {
@@ -20,6 +20,14 @@ module.exports = async (req, res, next) => {
       }
       if (u.role_version > payload.rv) {
         return res.status(401).json({ error: 'token_stale' });
+      }
+    }
+
+    // Hard 12h session boundary — belt-and-suspenders on top of token expiry
+    if (payload.login_at) {
+      const now = Math.floor(Date.now() / 1000);
+      if (payload.login_at + SESSION_SECS <= now) {
+        return res.status(401).json({ error: 'session_expired' });
       }
     }
 

@@ -187,6 +187,9 @@ async function challengeMfa(req, res, next) {
       availableClinics.push(user.clinic_id);
     }
 
+    // Single session: revoke all existing sessions before issuing a new one
+    await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [user.id]);
+
     const { access_token, refresh_token } = signTokens(user, availableClinics, isOrgAdmin);
 
     await db.query(

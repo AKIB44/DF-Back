@@ -1,15 +1,16 @@
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const db     = require('../db');
-const { signTokens, verifyRefresh, hashToken, decodeExp } = require('./jwt.service');
+const { signTokens, verifyRefresh, hashToken, decodeExp, SESSION_SECS } = require('./jwt.service');
 const { checkIsOrgAdmin, getAvailableClinics } = require('./auth.helpers');
 const { issueMfaToken } = require('./mfa.controller');
 const { bumpVersion } = require('../rbac/permission.cache');
 const { sendOtp }     = require('../services/fast2sms');
 
-const OTP_TTL_MINUTES  = 10;
-const OTP_MAX_ATTEMPTS = 5;
-const OTP_RESEND_SECS  = 60;
+const OTP_TTL_MINUTES    = 10;
+const OTP_MAX_ATTEMPTS   = 5;
+const OTP_RESEND_SECS    = 60;
+const MAX_LOGIN_ATTEMPTS = 10; // auto-lock after this many consecutive failures
 
 function generateOtp() {
   return String(Math.floor(100000 + crypto.randomInt(900000)));
@@ -54,18 +55,27 @@ async function login(req, res, next) {
     );
     const user = rows[0];
 
-    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
-      if (user) {
-        await db.query(
-          `UPDATE users SET failed_login_count = failed_login_count + 1 WHERE id = $1`,
-          [user.id]
-        );
-      }
-      return res.status(401).json({ error: 'Invalid email or password' });
+    // Check account status before password comparison to avoid timing-based enumeration
+    if (user && (user.status_rbac === 'disabled' || user.status_rbac === 'locked')) {
+      return res.status(423).json({ error: 'Account locked or disabled. Contact your administrator.' });
     }
 
-    if (user.status_rbac === 'disabled' || user.status_rbac === 'locked') {
-      return res.status(401).json({ error: 'Account inactive' });
+    if (!user || !(await bcrypt.compare(password, user.password_hash))) {
+      if (user) {
+        const newCount = user.failed_login_count + 1;
+        const shouldLock = newCount >= MAX_LOGIN_ATTEMPTS;
+        await db.query(
+          `UPDATE users
+             SET failed_login_count = $1,
+                 status_rbac = CASE WHEN $2 THEN 'locked' ELSE status_rbac END
+           WHERE id = $3`,
+          [newCount, shouldLock, user.id]
+        );
+        if (shouldLock) {
+          return res.status(423).json({ error: 'Account locked after too many failed attempts. Contact your administrator.' });
+        }
+      }
+      return res.status(401).json({ error: 'Invalid email or password' });
     }
 
     const isOrgAdmin = await checkIsOrgAdmin(user.id);
@@ -86,6 +96,9 @@ async function login(req, res, next) {
     if (!availableClinics.includes(user.clinic_id) && user.clinic_id) {
       availableClinics.push(user.clinic_id);
     }
+
+    // Single session: revoke all existing sessions before issuing a new one
+    await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [user.id]);
 
     const { access_token, refresh_token } = signTokens(user, availableClinics, isOrgAdmin);
 
@@ -128,6 +141,14 @@ async function refresh(req, res, next) {
       return res.status(401).json({ error: 'Invalid or expired refresh token' });
     }
 
+    // Enforce 12h session boundary using the login_at embedded in the token
+    const loginAt = payload.login_at;
+    const now     = Math.floor(Date.now() / 1000);
+    if (loginAt && loginAt + SESSION_SECS <= now) {
+      await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [payload.sub]);
+      return res.status(401).json({ error: 'session_expired' });
+    }
+
     const tokenHash = hashToken(refresh_token);
     const { rows: stored } = await db.query(
       `SELECT id FROM refresh_tokens WHERE token_hash = $1 AND expires_at > now()`,
@@ -149,7 +170,8 @@ async function refresh(req, res, next) {
       availableClinics.push(user.clinic_id);
     }
 
-    const { access_token, refresh_token: new_refresh } = signTokens(user, availableClinics, isOrgAdmin);
+    // Carry login_at forward so the session window is never extended past 12h
+    const { access_token, refresh_token: new_refresh } = signTokens(user, availableClinics, isOrgAdmin, loginAt);
 
     await db.query(
       `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
@@ -228,7 +250,13 @@ async function switchClinic(req, res, next) {
     const { rows } = await db.query(`SELECT * FROM users WHERE id = $1`, [req.user.sub]);
     const user = { ...rows[0], clinic_id: clinicId };
 
-    const { access_token, refresh_token } = signTokens(user, available, req.user.is_org_admin || false);
+    // Preserve original login_at so clinic switch cannot extend the 12h session window
+    const loginAt = req.user.login_at ?? null;
+
+    // Replace the existing refresh token (single session — wipe and reissue)
+    await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [user.id]);
+
+    const { access_token, refresh_token } = signTokens(user, available, req.user.is_org_admin || false, loginAt);
 
     await db.query(
       `INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at)
@@ -421,6 +449,9 @@ async function verifyOtp(req, res, next) {
     if (!availableClinics.includes(user.clinic_id) && user.clinic_id) {
       availableClinics.push(user.clinic_id);
     }
+
+    // Single session: revoke all existing sessions before issuing a new one
+    await db.query(`DELETE FROM refresh_tokens WHERE user_id = $1`, [user.id]);
 
     const { access_token, refresh_token } = signTokens(user, availableClinics, isOrgAdmin);
 
