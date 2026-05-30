@@ -20,24 +20,25 @@ async function write(evt) {
       `INSERT INTO activity_log
          (user_id, clinic_id, user_name, user_email, method, path, action, details,
           entity_type, entity_id, status_code, duration_ms, ip_address,
-          user_agent, request_body)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+          user_agent, request_body, request_headers)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
       [
-        evt.user_id     || null,
-        evt.clinic_id   || null,
-        user_name       || null,
-        user_email      || null,
+        evt.user_id        || null,
+        evt.clinic_id      || null,
+        user_name          || null,
+        user_email         || null,
         evt.method,
         evt.path,
-        evt.action      || null,
-        evt.details     || null,
-        evt.entity_type || null,
-        evt.entity_id   || null,
+        evt.action         || null,
+        evt.details        || null,
+        evt.entity_type    || null,
+        evt.entity_id      || null,
         evt.status_code,
-        evt.duration_ms || null,
-        evt.ip_address  || null,
-        evt.user_agent  || null,
-        evt.request_body ? JSON.stringify(evt.request_body) : null,
+        evt.duration_ms    || null,
+        evt.ip_address     || null,
+        evt.user_agent     || null,
+        evt.request_body    ? JSON.stringify(evt.request_body)    : null,
+        evt.request_headers ? JSON.stringify(evt.request_headers) : null,
       ]
     );
   } catch (err) {

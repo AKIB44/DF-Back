@@ -2,6 +2,21 @@ const activityService = require('../activity/activity.service');
 
 const SENSITIVE_KEYS = ['password', 'password_hash', 'token', 'refresh_token', 'secret'];
 
+// Headers that carry credentials or add no diagnostic value
+const HEADER_BLOCKLIST = new Set([
+  'authorization', 'cookie', 'set-cookie',
+  'x-api-key', 'proxy-authorization',
+]);
+
+function sanitizeHeaders(headers) {
+  const out = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (HEADER_BLOCKLIST.has(k.toLowerCase())) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
 // Returns the real client IP, normalising IPv6-mapped IPv4 (::ffff:1.2.3.4 → 1.2.3.4)
 // and preferring the leftmost (original client) entry in X-Forwarded-For.
 function extractIp(req) {
@@ -211,34 +226,55 @@ const logger = (req, res, next) => {
   res.on('finish', () => {
     const ms     = Date.now() - start;
     const status = res.statusCode;
-    const line   = `[${new Date().toISOString()}] ${req.method} ${req.originalUrl} → ${status} (${ms}ms)`;
+    const ip     = extractIp(req);
+    const safeHeaders = sanitizeHeaders(req.headers);
+    const queryParams = Object.keys(req.query).length ? req.query : null;
+    const log = status >= 400 ? console.error.bind(console) : console.log.bind(console);
 
-    if (status >= 400) {
-      console.error(line);
-      if (responseBody?.error)   console.error('  error:', responseBody.error);
-      if (responseBody?.details) console.error('  details:', responseBody.details);
-    } else {
-      console.log(line);
+    log('─'.repeat(72));
+    log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} → ${status} (${ms}ms)`);
+    log(`  IP         : ${ip || 'unknown'}`);
+    log(`  User-Agent : ${req.headers['user-agent'] || '—'}`);
+
+    if (queryParams) {
+      log(`  Query      : ${JSON.stringify(queryParams)}`);
     }
 
-    if (req.method !== 'GET' || status >= 400) {
+    const headerLines = Object.entries(safeHeaders)
+      .map(([k, v]) => `    ${k}: ${v}`)
+      .join('\n');
+    log(`  Headers    :\n${headerLines}`);
+
+    if (req.method !== 'GET' && req.body && Object.keys(req.body).length) {
+      log(`  Body       : ${JSON.stringify(sanitizeBody(req.body))}`);
+    }
+
+    if (status >= 400) {
+      if (responseBody?.error)   log(`  Error      : ${responseBody.error}`);
+      if (responseBody?.details) log(`  Details    : ${JSON.stringify(responseBody.details)}`);
+    }
+
+    log('─'.repeat(72));
+
+    {
       const { action, entityType, entityId } = resolveAction(req.method, capturedPath);
       const user = req.user;
 
       activityService.write({
-        user_id:      user?.sub       || null,
-        clinic_id:    user?.clinic_id || user?.active_clinic_id || null,
-        method:       req.method,
-        path:         req.originalUrl,
+        user_id:         user?.sub       || null,
+        clinic_id:       user?.clinic_id || user?.active_clinic_id || null,
+        method:          req.method,
+        path:            req.originalUrl,
         action,
-        details:      buildDetail(req.method, capturedPath, req.body),
-        entity_type:  entityType,
-        entity_id:    entityId ? String(entityId) : null,
-        status_code:  status,
-        duration_ms:  ms,
-        ip_address:   extractIp(req),
-        user_agent:   req.headers['user-agent'] || null,
-        request_body: req.method !== 'GET' ? sanitizeBody(req.body) : null,
+        details:         buildDetail(req.method, capturedPath, req.body),
+        entity_type:     entityType,
+        entity_id:       entityId ? String(entityId) : null,
+        status_code:     status,
+        duration_ms:     ms,
+        ip_address:      extractIp(req),
+        user_agent:      req.headers['user-agent'] || null,
+        request_body:    req.method !== 'GET' ? sanitizeBody(req.body) : null,
+        request_headers: sanitizeHeaders(req.headers),
       });
     }
   });
