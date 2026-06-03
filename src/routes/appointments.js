@@ -214,11 +214,17 @@ router.post('/', ...authChain, requirePermission(P.APPOINTMENT_CREATE), validate
       return res.status(409).json({ error: 'This slot is no longer available. Please pick another time.' });
     }
 
-    // Look up or create patient; always refresh demographics if provided
+    // Look up or create patient. Identity is (phone + name) — same phone with a
+    // different name is treated as a separate person (e.g. family member sharing
+    // a contact number), not an update to the existing record.
     let patientId;
     const existingPat = await db.query(
-      `SELECT id FROM patients WHERE clinic_id=$1 AND phone=$2 LIMIT 1`,
-      [clinicId, patient.phone]
+      `SELECT id FROM patients
+         WHERE clinic_id = $1
+           AND phone     = $2
+           AND LOWER(TRIM(name)) = LOWER(TRIM($3))
+         LIMIT 1`,
+      [clinicId, patient.phone, patient.name]
     );
     if (existingPat.rows.length) {
       patientId = existingPat.rows[0].id;

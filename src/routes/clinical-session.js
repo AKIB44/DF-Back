@@ -89,7 +89,7 @@ router.post(
 
       const doctorId = req.body.doctor_id || userId;
 
-      const session = await withTx(async (client) => {
+      const { session, activeCases } = await withTx(async (client) => {
         // Transition appointment to in_treatment
         await client.query(
           `UPDATE appointments SET status = 'in_treatment', updated_at = NOW()
@@ -104,17 +104,47 @@ router.post(
           userId,
         });
 
-        return sess;
+        // Link active specialty cases — create a specialty_visit for each active case
+        const { rows: openCases } = await client.query(
+          `SELECT id, case_type FROM specialty_case
+            WHERE org_id = $1 AND clinic_id = $2 AND patient_id = $3
+              AND status = 'ACTIVE' AND deleted_at IS NULL`,
+          [orgId, clinicId, appt.patient_id]
+        );
+
+        for (const sc of openCases) {
+          const { rows: cntRows } = await client.query(
+            `SELECT COALESCE(MAX(visit_number), 0) + 1 AS next
+               FROM specialty_visit
+              WHERE case_id = $1 AND deleted_at IS NULL`,
+            [sc.id]
+          );
+          const visitNumber = cntRows[0].next;
+
+          await client.query(
+            `INSERT INTO specialty_visit
+               (org_id, clinic_id, case_id, session_id, visit_number, created_by, updated_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$6)
+             ON CONFLICT (session_id) DO NOTHING`,
+            [orgId, clinicId, sc.id, sess.id, visitNumber, userId]
+          );
+        }
+
+        return { session: sess, activeCases: openCases };
       });
 
       req.audit.write({
         entity_type: 'clinical_session',
         entity_id:   session.id,
         action:      'START_TREATMENT',
-        details:     { appointment_id: appointmentId, doctor_id: doctorId },
+        details:     {
+          appointment_id:  appointmentId,
+          doctor_id:       doctorId,
+          specialty_cases: activeCases.map(c => c.id),
+        },
       });
 
-      return res.status(201).json({ session });
+      return res.status(201).json({ session, active_specialty_cases: activeCases });
     } catch (err) {
       next(err);
     }

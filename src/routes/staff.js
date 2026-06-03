@@ -74,8 +74,13 @@ router.post('/', validate(createSchema), async (req, res, next) => {
     const rbacCode = ROLE_MAP[role] || 'reception';
     const roleRow = await db.query(`SELECT id FROM roles WHERE code=$1 AND is_system=true`, [rbacCode]);
     if (roleRow.rows.length) {
+      // The users-table AFTER INSERT trigger may have already seeded this row
+      // based on the legacy `role` column; the unique partial index ensures we
+      // don't end up with duplicates.
       await db.query(
-        `INSERT INTO user_roles (user_id, role_id, clinic_id, granted_by) VALUES ($1,$2,$3,$4)`,
+        `INSERT INTO user_roles (user_id, role_id, clinic_id, granted_by)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT DO NOTHING`,
         [newUser.id, roleRow.rows[0].id, req.user.clinic_id, req.user.sub]
       );
     }

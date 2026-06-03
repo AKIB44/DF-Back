@@ -1,4 +1,4 @@
-const rateLimit = require('express-rate-limit');
+const { default: rateLimit, ipKeyGenerator } = require('express-rate-limit');
 
 const UUID_RE      = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const TRAVERSAL_RE = /(\.\.[/\\]|%2e%2e[/\\%])/i;
@@ -101,7 +101,7 @@ function requestTimeout(req, res, next) {
 const perUserLimiter = rateLimit({
   windowMs:  60 * 1000,
   max:       120,
-  keyGenerator: (req) => req.user?.sub || req.ip,
+  keyGenerator: (req) => req.user?.sub || ipKeyGenerator(req),
   standardHeaders: true,
   legacyHeaders:   false,
   skip: () => process.env.NODE_ENV === 'test',

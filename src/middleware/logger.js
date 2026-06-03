@@ -34,6 +34,17 @@ function sanitizeBody(body) {
   return clone;
 }
 
+function formatRequestUser(user) {
+  if (!user?.sub && !user?.display_name && !user?.email) return '—';
+  const name = user.display_name
+    || [user.first_name, user.last_name].filter(Boolean).join(' ').trim();
+  const parts = [];
+  if (name) parts.push(name);
+  if (user.email) parts.push(`<${user.email}>`);
+  if (user.sub) parts.push(`id=${user.sub}`);
+  return parts.join(' ') || String(user.sub);
+}
+
 // Most-specific patterns first
 function resolveAction(method, path) {
   const p   = path.replace(/^\/v1\//, '');
@@ -234,6 +245,7 @@ const logger = (req, res, next) => {
     log('─'.repeat(72));
     log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} → ${status} (${ms}ms)`);
     log(`  IP         : ${ip || 'unknown'}`);
+    log(`  User       : ${formatRequestUser(req.user)}`);
     log(`  User-Agent : ${req.headers['user-agent'] || '—'}`);
 
     if (queryParams) {
@@ -262,6 +274,8 @@ const logger = (req, res, next) => {
 
       activityService.write({
         user_id:         user?.sub       || null,
+        user_name:       user?.display_name || null,
+        user_email:      user?.email || null,
         clinic_id:       user?.clinic_id || user?.active_clinic_id || null,
         method:          req.method,
         path:            req.originalUrl,

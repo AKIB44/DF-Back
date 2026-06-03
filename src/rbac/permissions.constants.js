@@ -25,6 +25,12 @@ const P = {
 
   SERVICE_MANAGE_OWN: 'service.manage_own',
 
+  SPECIALTY_VIEW:   'specialty.view',
+  SPECIALTY_CREATE: 'specialty.create',
+  SPECIALTY_UPDATE: 'specialty.update',
+
+  FEATURE_FLAG_MANAGE: 'feature_flag.manage',
+
   ORG_MANAGE:      'org.manage',
   PLATFORM_MANAGE: 'platform.manage',
 };

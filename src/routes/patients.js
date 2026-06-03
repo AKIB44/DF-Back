@@ -65,13 +65,19 @@ router.post('/', requirePermission(P.PATIENT_CREATE), validate(patientSchema), a
   try {
     const { name, phone, email, dob, gender, address, age, clinical_history } = req.body;
 
+    // Duplicate guard: only block when BOTH phone and name already exist on
+    // this clinic. A shared phone with a different name is allowed so family
+    // members can register under the same contact number.
     const dup = await db.query(
-      `SELECT id FROM patients WHERE clinic_id = $1 AND phone = $2`,
-      [req.user.clinic_id, phone]
+      `SELECT id FROM patients
+         WHERE clinic_id = $1
+           AND phone     = $2
+           AND LOWER(TRIM(name)) = LOWER(TRIM($3))`,
+      [req.user.clinic_id, phone, name]
     );
     if (dup.rows.length) {
       return res.status(409).json({
-        error: 'Patient with this phone already exists',
+        error: 'A patient with this phone and name already exists',
         existing_id: dup.rows[0].id,
       });
     }

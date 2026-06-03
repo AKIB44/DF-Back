@@ -233,6 +233,81 @@ async function isAlreadyApplied(client, file) {
   if (file === '032_tpa_preauth.sql') {
     return tableExists(client, 'tpa_preauth');
   }
+  if (file === '033_inventory_seed.sql') {
+    return columnExists(client, 'inventory_item', 'is_traceable');
+  }
+  if (file === '034_unit_cost.sql') {
+    return columnExists(client, 'inventory_item', 'unit_cost');
+  }
+  if (file === '035_purchase_orders.sql') {
+    return tableExists(client, 'purchase_order');
+  }
+  if (file === '036_chair_servicing.sql') {
+    return tableExists(client, 'chair_service_log');
+  }
+  if (file === '037_activity_log_headers.sql') {
+    return columnExists(client, 'activity_log', 'request_headers');
+  }
+  if (file === '038_specialty_foundation.sql') {
+    return tableExists(client, 'specialty_case');
+  }
+  if (file === '039_specialty_catalog_extension.sql') {
+    return columnExists(client, 'services', 'creates_specialty_case');
+  }
+  if (file === '040_specialty_attachment_extension.sql') {
+    return tableExists(client, 'specialty_photo_series_tag');
+  }
+  if (file === '041_ortho_foundation.sql') {
+    return tableExists(client, 'ortho_case_detail');
+  }
+  if (file === '042_ortho_phase_seed.sql') {
+    const { rows } = await client.query(
+      `SELECT 1 FROM services WHERE specialty_case_type = 'ORTHO' LIMIT 1`
+    );
+    return rows.length > 0;
+  }
+  if (file === '043_implant_foundation.sql') {
+    return tableExists(client, 'implant_case_detail');
+  }
+  if (file === '044_implant_service_seed.sql') {
+    const { rows } = await client.query(
+      `SELECT 1 FROM services WHERE specialty_case_type = 'IMPLANT' LIMIT 1`
+    );
+    return rows.length > 0;
+  }
+  if (file === '045_paedo_foundation.sql') {
+    return tableExists(client, 'paedo_case_detail');
+  }
+  if (file === '046_paedo_service_seed.sql') {
+    const { rows } = await client.query(
+      `SELECT 1 FROM services WHERE specialty_case_type = 'PAEDO' LIMIT 1`
+    );
+    return rows.length > 0;
+  }
+  if (file === '047_endo_foundation.sql') {
+    return tableExists(client, 'endo_case_detail');
+  }
+  if (file === '048_endo_service_seed.sql') {
+    const { rows } = await client.query(
+      `SELECT 1 FROM services WHERE specialty_case_type = 'ENDO' LIMIT 1`
+    );
+    return rows.length > 0;
+  }
+  if (file === '049_tmj_foundation.sql') {
+    return tableExists(client, 'tmj_case_detail');
+  }
+  if (file === '050_tmj_service_seed.sql') {
+    const { rows } = await client.query(
+      `SELECT 1 FROM services WHERE specialty_case_type = 'TMJ' LIMIT 1`
+    );
+    return rows.length > 0;
+  }
+  if (file === '051_specialty_permissions.sql') {
+    const { rows } = await client.query(
+      `SELECT 1 FROM permissions WHERE code = 'specialty.view' LIMIT 1`
+    );
+    return rows.length > 0;
+  }
   return false;
 }
 
