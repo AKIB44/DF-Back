@@ -223,15 +223,46 @@ async function me(req, res, next) {
 async function myPermissions(req, res, next) {
   try {
     const { resolvePermissions } = require('../rbac/permission.resolver');
+    const { buildSubject }       = require('../security/helpers/build-subject');
+    const { profileFor, VISIBILITY_PROFILES } = require('../security/middleware/field-filter.middleware');
+
     const clinicId = req.query.clinicId || req.context?.clinicId;
     const permissions = await resolvePermissions(req.user.sub, clinicId);
+    if (req.user.is_org_admin) permissions['org.manage'] = { scope: 'org' };
 
-    // Org admins always have org.manage regardless of clinic context.
-    if (req.user.is_org_admin) {
-      permissions['org.manage'] = { scope: 'org' };
+    // ── ABAC manifest extension (PRD §9.1) ────────────────────────────────
+    const subject = await buildSubject(req);
+
+    // Derive per-resource action map from the permission codes the user holds.
+    // RBAC permission code shape is `<module>.<action>` (or with qualifier);
+    // we treat `module` as the resource family and group actions under it.
+    const actions = {};
+    for (const code of Object.keys(permissions)) {
+      const [mod, act] = code.split('.');
+      if (!mod || !act) continue;
+      (actions[mod] ||= []).push(act);
     }
 
-    res.json({ permissions });
+    // Field visibility — pull each known resource's profile for this role.
+    const fieldVisibility = {};
+    const knownResources = new Set([
+      'session','patient','clinical_note','examination','diagnosis','prescription',
+      'charge_line','payment','invoice','service_performed','booking',
+      'specialty_case','treatment_plan','inventory_item','stock_movement','lab_order',
+    ]);
+    for (const rt of knownResources) {
+      fieldVisibility[rt] = profileFor(subject.role, rt);
+    }
+
+    res.json({
+      permissions,                            // legacy RBAC shape (backwards compat)
+      role:            subject.role,
+      hierarchyLevel:  subject.hierarchyLevel,
+      specialtyTags:   subject.specialtyTags,
+      branchId:        subject.branchId,
+      actions,                                // { session: ['read', 'create'], ... }
+      fieldVisibility,                        // { session: ['*'] | ['id', 'status', ...], ... }
+    });
   } catch (err) {
     next(err);
   }

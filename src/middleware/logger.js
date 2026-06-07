@@ -230,6 +230,10 @@ const logger = (req, res, next) => {
   const originalJson = res.json.bind(res);
   let responseBody;
   res.json = (body) => {
+    // Guard against double-send (e.g. requestTimeout's 503 fires, then a slow
+    // handler completes and tries to respond): writing again throws
+    // ERR_HTTP_HEADERS_SENT and crashes the request. Swallow the late write.
+    if (res.headersSent) return res;
     responseBody = body;
     return originalJson(body);
   };

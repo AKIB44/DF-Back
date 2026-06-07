@@ -23,7 +23,6 @@ ALTER TABLE IF EXISTS role_permissions    OWNER TO dentaflow_app;
 ALTER TABLE IF EXISTS user_roles          OWNER TO dentaflow_app;
 ALTER TABLE IF EXISTS permission_overrides OWNER TO dentaflow_app;
 ALTER TABLE IF EXISTS rbac_audit_log      OWNER TO dentaflow_app;
-ALTER TABLE IF EXISTS break_glass_sessions OWNER TO dentaflow_app;
 ALTER TABLE IF EXISTS activity_log        OWNER TO dentaflow_app;
 ALTER TABLE IF EXISTS rx_sequence         OWNER TO dentaflow_app;
 ALTER TABLE IF EXISTS rx_medicines        OWNER TO dentaflow_app;

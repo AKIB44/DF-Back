@@ -92,6 +92,7 @@ const OWNER_REQUIRED = {
   '030_preop_record.sql':                 'clinical_session',
   '031_postop_record.sql':                'clinical_session',
   '032_tpa_preauth.sql':                  'clinical_session',
+  '059_session_summary_pdf.sql':          'clinical_session',
 };
 
 async function assertCanRunMigration(client, file) {
@@ -307,6 +308,12 @@ async function isAlreadyApplied(client, file) {
       `SELECT 1 FROM permissions WHERE code = 'specialty.view' LIMIT 1`
     );
     return rows.length > 0;
+  }
+  if (file === '059_session_summary_pdf.sql') {
+    return columnExists(client, 'clinical_session', 'summary_pdf_s3_key');
+  }
+  if (file === '060_idempotency_keys.sql') {
+    return tableExists(client, 'idempotency_keys');
   }
   return false;
 }

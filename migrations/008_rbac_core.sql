@@ -1,6 +1,6 @@
 -- ─── 008: Multi-Tenant RBAC core tables ──────────────────────────────────────
 -- Adds: organizations, permissions, roles, role_permissions, user_roles,
---       permission_overrides, rbac_audit_log, break_glass_sessions
+--       permission_overrides, rbac_audit_log
 -- Extends: users (org_id, role_version, status_rbac, mfa_*, last_login_at, failed_login_count)
 
 -- ── Organizations ─────────────────────────────────────────────────────────────
@@ -119,18 +119,6 @@ CREATE TABLE IF NOT EXISTS rbac_audit_log (
 CREATE INDEX IF NOT EXISTS idx_rbac_audit_actor    ON rbac_audit_log(actor_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_rbac_audit_resource ON rbac_audit_log(resource_type, resource_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_rbac_audit_clinic   ON rbac_audit_log(clinic_id, created_at);
-
--- ── Break-glass emergency sessions ───────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS break_glass_sessions (
-  id          UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id     UUID        NOT NULL REFERENCES users(id),
-  reason      TEXT        NOT NULL,
-  patient_id  UUID,
-  approved_by UUID,
-  started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-  expires_at  TIMESTAMPTZ NOT NULL,
-  revoked_at  TIMESTAMPTZ
-);
 
 -- ── Seed: permissions catalog ──────────────────────────────────────────────────
 INSERT INTO permissions (code, module, action, description, default_scope, is_sensitive) VALUES

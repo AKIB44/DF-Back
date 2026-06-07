@@ -10,7 +10,15 @@ const auditMw         = require('../audit/audit.middleware');
 const { requirePermission } = require('../rbac/require-permission.middleware');
 const P               = require('../rbac/permissions.constants');
 const { createError } = require('../helpers/errors');
-const { getPresignedPutUrl, getPresignedUrl, deleteObject } = require('../services/s3Service');
+const {
+  getPresignedPutUrl, getPresignedUrl, deleteObject,
+  buildSessionSummaryPdfKey, uploadBuffer, objectExists, getS3Client,
+} = require('../services/s3Service');
+const sessionSummaryPdfBuilder = require('../services/sessionSummaryPdfBuilder');
+const { GetObjectCommand } = require('@aws-sdk/client-s3');
+const { loadResource, mapLoadedResource } = require('../security/middleware/load-resource.middleware');
+const { authorize }    = require('../security/middleware/authorize.middleware');
+const { fieldFilter }  = require('../security/middleware/field-filter.middleware');
 
 const authChain = [authenticate, tenantScope, auditMw];
 
@@ -46,11 +54,116 @@ async function withTx(fn) {
   }
 }
 
+// ── Treatment summary + invoice PDF ──────────────────────────────────────────
+// In-process clinic-logo cache (keyed by clinic_id, 5-min TTL) so we don't refetch
+// the same logo from S3 on every seal.
+const _logoCache = new Map();
+const LOGO_TTL_MS = 5 * 60 * 1000;
+
+async function _fetchLogoBuffer(s3Key, clinicId) {
+  const cached = _logoCache.get(clinicId);
+  if (cached && cached.expiresAt > Date.now()) return cached.buffer;
+  try {
+    const resp = await getS3Client().send(new GetObjectCommand({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key:    s3Key,
+    }));
+    const chunks = [];
+    for await (const chunk of resp.Body) chunks.push(chunk);
+    const buffer = Buffer.concat(chunks);
+    _logoCache.set(clinicId, { buffer, expiresAt: Date.now() + LOGO_TTL_MS });
+    return buffer;
+  } catch {
+    return null; // logo failure must never block PDF generation
+  }
+}
+
+/**
+ * Build the treatment-summary + invoice PDF for a sealed session, upload it to
+ * S3, and persist the key + invoice number on clinical_session. Returns the
+ * stored row fields, or null on failure (caller decides whether that's fatal).
+ */
+async function generateSessionSummaryPdf({ sessionId, clinicId }) {
+  const { rows: hdrRows } = await db.query(
+    `SELECT cs.id, cs.patient_id, cs.clinic_id, cs.sealed_at, cs.variance_reason,
+            pat.name  AS patient_name, pat.phone AS patient_phone,
+            pat.age   AS patient_age,  pat.gender AS patient_gender,
+            u.first_name AS doctor_first_name, u.last_name AS doctor_last_name,
+            u.designation AS doctor_designation,
+            c.name AS clinic_name, c.phone AS clinic_phone, c.email AS clinic_email,
+            c.address AS clinic_address, c.city AS clinic_city, c.logo_s3_key AS clinic_logo_s3_key
+       FROM clinical_session cs
+       JOIN patients pat ON pat.id = cs.patient_id
+       JOIN users    u   ON u.id   = cs.primary_doctor_id
+       JOIN clinics  c   ON c.id   = cs.clinic_id
+      WHERE cs.id = $1 AND cs.clinic_id = $2`,
+    [sessionId, clinicId]
+  );
+  if (!hdrRows.length) return null;
+  const hdr = hdrRows[0];
+
+  const [{ rows: services }, { rows: diagnoses }, { rows: prescriptions }] = await Promise.all([
+    db.query(
+      `SELECT sp.tooth_numbers, sp.status, sp.final_charge, s.name AS service_name
+         FROM service_performed sp
+         JOIN services s ON s.id = sp.service_id
+        WHERE sp.session_id = $1 AND sp.deleted_at IS NULL
+        ORDER BY sp.started_at ASC`,
+      [sessionId]
+    ),
+    db.query(
+      `SELECT diagnosis_text, icd10_code, tooth_numbers, kind
+         FROM diagnosis
+        WHERE session_id = $1 AND deleted_at IS NULL
+        ORDER BY created_at ASC`,
+      [sessionId]
+    ),
+    db.query(
+      `SELECT li.dosage, li.frequency, li.duration, li.quantity, li.instructions,
+              m.generic_name AS medicine_name, m.strength AS medicine_strength
+         FROM prescriptions p
+         JOIN rx_line_items li ON li.prescription_id = p.id AND li.is_deleted = false
+         LEFT JOIN rx_medicines m ON m.id = li.ref_id AND li.item_type = 'medicine'
+        WHERE p.session_id = $1 AND li.item_type = 'medicine'
+        ORDER BY p.created_at ASC, li.sort_order ASC`,
+      [sessionId]
+    ),
+  ]);
+
+  const total = services
+    .filter(sv => sv.status === 'COMPLETED' || sv.status === 'PARTIAL')
+    .reduce((sum, sv) => sum + parseFloat(sv.final_charge || 0), 0);
+
+  const invoiceNo = `INV-${String(sessionId).slice(0, 8).toUpperCase()}`;
+
+  const logoBuffer = hdr.clinic_logo_s3_key
+    ? await _fetchLogoBuffer(hdr.clinic_logo_s3_key, hdr.clinic_id)
+    : null;
+
+  const pdfBuffer = await sessionSummaryPdfBuilder.build(
+    { ...hdr, invoice_no: invoiceNo, services, diagnoses, prescriptions, total },
+    { logoBuffer }
+  );
+
+  const s3Key = buildSessionSummaryPdfKey({ patientId: hdr.patient_id, sessionId });
+  await uploadBuffer({ key: s3Key, buffer: pdfBuffer, contentType: 'application/pdf', encrypt: true });
+
+  const { rows } = await db.query(
+    `UPDATE clinical_session
+        SET invoice_no = $3, summary_pdf_s3_key = $4, summary_pdf_generated_at = now()
+      WHERE id = $1 AND clinic_id = $2
+      RETURNING invoice_no, summary_pdf_s3_key, summary_pdf_generated_at`,
+    [sessionId, clinicId, invoiceNo, s3Key]
+  );
+  return rows[0] || null;
+}
+
 // ── POST /appointments/:id/start-treatment  (Endpoint 1) ─────────────────────
 router.post(
   '/appointments/:id/start-treatment',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  authorize('create', 'session'),
   validate(startTreatmentSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -156,6 +269,10 @@ router.get(
   '/sessions/:id',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  authorize('read', 'session'),
+  fieldFilter('session', { entity: 'session' }),
+  fieldFilter('clinical_note', { entity: 'note' }),
   async (req, res, next) => {
     const { orgId, clinicId } = req.context;
     try {
@@ -180,6 +297,8 @@ router.patch(
   '/sessions/:id/notes',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   validate(soapSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -232,6 +351,8 @@ router.post(
   '/sessions/:id/services',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   validate(addServiceSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -356,6 +477,8 @@ router.patch(
   '/services/:id',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('service_performed', 'id'),
+  authorize('update', 'service_performed'),
   validate(updateServiceSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -513,6 +636,9 @@ router.get(
   '/sessions/:id/services',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  authorize('read', 'session', { mode: 'observe' }),
+  fieldFilter('service_performed', { collection: 'services' }),
   async (req, res, next) => {
     const { orgId, clinicId } = req.context;
     try {
@@ -544,6 +670,8 @@ router.post(
   '/sessions/:id/end-treatment',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('seal', 'session'),
   validate(endTreatmentSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -644,12 +772,6 @@ router.post(
           }
         }
 
-        if (reservedItems.length) {
-          await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock`).catch(() =>
-            client.query(`REFRESH MATERIALIZED VIEW current_stock`)
-          );
-        }
-
         // Transition appointment to done (billing handled separately by reception)
         await client.query(
           `UPDATE appointments SET status = 'done', updated_at = NOW()
@@ -657,17 +779,79 @@ router.post(
           [session.appointment_id]
         );
 
-        return sessRows[0];
+        return { session: sessRows[0], refreshStock: reservedItems.length > 0 };
       });
+
+      // Refresh stock view AFTER commit — REFRESH MATERIALIZED VIEW CONCURRENTLY
+      // cannot run inside a transaction block.
+      if (sealed.refreshStock) {
+        await db.pool.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock`).catch(() =>
+          db.pool.query(`REFRESH MATERIALIZED VIEW current_stock`)
+        );
+      }
+
+      // Generate the treatment summary + invoice PDF (stored in S3, viewable later).
+      // The session is already sealed/committed — a PDF failure must not fail the seal.
+      let summary = null;
+      try {
+        summary = await generateSessionSummaryPdf({ sessionId, clinicId });
+      } catch (pdfErr) {
+        console.error(`[seal] summary PDF generation failed for session ${sessionId}:`, pdfErr.message);
+      }
 
       req.audit.write({
         entity_type: 'clinical_session',
         entity_id:   sessionId,
         action:      'SEAL_SESSION',
-        details:     { sealed_by: userId },
+        details:     { sealed_by: userId, invoice_no: summary?.invoice_no || null },
       });
 
-      return res.json({ session: sealed });
+      return res.json({
+        session: { ...sealed.session, ...(summary || {}) },
+      });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── GET /sessions/:id/summary-pdf — presigned URL for the treatment summary ──
+router.get(
+  '/sessions/:id/summary-pdf',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  authorize('read', 'session', { mode: 'observe' }),
+  async (req, res, next) => {
+    const { orgId, clinicId } = req.context;
+    const sessionId = req.params.id;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+
+      const { rows } = await db.query(
+        `SELECT summary_pdf_s3_key, invoice_no FROM clinical_session
+          WHERE id = $1 AND clinic_id = $2`,
+        [sessionId, clinicId]
+      );
+      let s3Key = rows[0]?.summary_pdf_s3_key;
+
+      // Lazily (re)generate if missing — e.g. session sealed before this feature,
+      // or a prior generation failed. Only possible once a session is sealed.
+      if (!s3Key && session.sealed_at) {
+        const summary = await generateSessionSummaryPdf({ sessionId, clinicId });
+        s3Key = summary?.summary_pdf_s3_key;
+      }
+
+      if (!s3Key) return next(createError(404, 'Summary PDF not available — seal the session first'));
+      if (!(await objectExists({ key: s3Key })))
+        return next(createError(404, 'Summary PDF missing in storage'));
+
+      const url = await getPresignedUrl({
+        key:       s3Key,
+        expiresIn: Number(process.env.AWS_S3_SIGNED_URL_TTL_SECONDS || 900),
+      });
+      return res.json({ url, invoice_no: rows[0]?.invoice_no || null });
     } catch (err) {
       next(err);
     }
@@ -690,6 +874,8 @@ router.patch(
   '/sessions/:id/examination',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   validate(examinationSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -739,6 +925,10 @@ router.get(
   '/sessions/:id/examination',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  mapLoadedResource('examination'),
+  authorize('read', 'examination'),
+  fieldFilter('examination', { entity: 'examination' }),
   async (req, res, next) => {
     const { orgId, clinicId } = req.context;
     try {
@@ -765,6 +955,8 @@ router.post(
   '/sessions/:id/diagnoses',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   validate(diagnosisSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -795,6 +987,8 @@ router.delete(
   '/sessions/:id/diagnoses/:dxId',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
     try {
@@ -821,6 +1015,10 @@ router.get(
   '/sessions/:id/diagnoses',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  mapLoadedResource('diagnosis'),
+  authorize('read', 'diagnosis'),
+  fieldFilter('diagnosis', { collection: 'diagnoses' }),
   async (req, res, next) => {
     const { orgId, clinicId } = req.context;
     try {
@@ -840,6 +1038,9 @@ router.get(
   '/sessions/:id/chart',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  mapLoadedResource('examination'),
+  authorize('read', 'examination'),
   async (req, res, next) => {
     const { orgId, clinicId } = req.context;
     try {
@@ -867,6 +1068,8 @@ router.put(
   '/sessions/:id/chart',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   validate(chartSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -896,6 +1099,10 @@ router.put(
 router.post(
   '/patients/:patientId/treatment-plans',
   ...authChain,
+  requirePermission(P.PATIENT_UPDATE),
+  loadResource('patient', 'patientId'),
+  mapLoadedResource('treatment_plan'),
+  authorize('create', 'treatment_plan'),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
     const { patientId } = req.params;
@@ -915,6 +1122,10 @@ router.post(
 router.get(
   '/patients/:patientId/treatment-plans',
   ...authChain,
+  requirePermission(P.PATIENT_VIEW),
+  loadResource('patient', 'patientId'),
+  mapLoadedResource('treatment_plan'),
+  authorize('read', 'treatment_plan', { mode: 'observe' }),
   async (req, res, next) => {
     const { orgId, clinicId } = req.context;
     const { patientId } = req.params;
@@ -973,6 +1184,10 @@ const planItemSchema = Joi.object({
 router.post(
   '/treatment-plans/:planId/items',
   ...authChain,
+  requirePermission(P.PATIENT_UPDATE),
+  loadResource('treatment_plan', 'planId'),
+  mapLoadedResource('treatment_plan_item'),
+  authorize('create', 'treatment_plan_item'),
   validate(planItemSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -1017,6 +1232,9 @@ const planItemPatchSchema = Joi.object({
 router.patch(
   '/treatment-plan-items/:itemId',
   ...authChain,
+  requirePermission(P.PATIENT_UPDATE),
+  loadResource('treatment_plan_item', 'itemId'),
+  authorize('update', 'treatment_plan_item'),
   validate(planItemPatchSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -1045,7 +1263,15 @@ router.patch(
 );
 
 // ── GET /sessions/:id/prescriptions ──────────────────────────────────────────
-router.get('/sessions/:id/prescriptions', ...authChain, async (req, res, next) => {
+router.get(
+  '/sessions/:id/prescriptions',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  mapLoadedResource('prescription'),
+  authorize('read', 'prescription'),
+  fieldFilter('prescription', { collection: 'prescriptions' }),
+  async (req, res, next) => {
   const { clinicId } = req.context;
   const { id: sessionId } = req.params;
   try {
@@ -1081,7 +1307,8 @@ router.get('/sessions/:id/prescriptions', ...authChain, async (req, res, next) =
     );
     return res.json({ prescriptions: rows });
   } catch (err) { next(err); }
-});
+  }
+);
 
 // ── POST /sessions/:id/prescriptions ─────────────────────────────────────────
 const sessionPrescriptionSchema = Joi.object({
@@ -1100,6 +1327,10 @@ const sessionPrescriptionSchema = Joi.object({
 router.post(
   '/sessions/:id/prescriptions',
   ...authChain,
+  requirePermission(P.PRESCRIPTION_CREATE),
+  loadResource('session', 'id'),
+  mapLoadedResource('prescription'),
+  authorize('create', 'prescription'),
   validate(sessionPrescriptionSchema),
   async (req, res, next) => {
     const { clinicId, userId } = req.context;
@@ -1237,6 +1468,9 @@ router.get(
   '/sessions/:id/investigations',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  mapLoadedResource('investigation'),
+  authorize('read', 'investigation'),
   async (req, res, next) => {
     try {
       const { id: sessionId } = req.params;
@@ -1265,6 +1499,9 @@ router.post(
   '/sessions/:id/investigations',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  mapLoadedResource('investigation'),
+  authorize('create', 'investigation'),
   validate(investigationOrderSchema),
   async (req, res, next) => {
     try {
@@ -1305,6 +1542,8 @@ router.patch(
   '/investigations/:id/receive',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('investigation', 'id'),
+  authorize('update', 'investigation'),
   validate(investigationReceiveSchema),
   async (req, res, next) => {
     try {
@@ -1352,6 +1591,8 @@ router.delete(
   '/investigations/:id',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('investigation', 'id'),
+  authorize('delete', 'investigation'),
   async (req, res, next) => {
     try {
       const { id } = req.params;
@@ -1457,6 +1698,8 @@ router.get(
   '/sessions/:id/cart',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  authorize('read', 'session', { mode: 'observe' }),
   async (req, res, next) => {
     try {
       const { id: sessionId } = req.params;
@@ -1478,6 +1721,8 @@ router.post(
   '/sessions/:id/cart',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   validate(cartAddSchema),
   async (req, res, next) => {
     try {
@@ -1523,6 +1768,8 @@ router.patch(
   '/sessions/:id/cart/:itemId',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   validate(cartPatchSchema),
   async (req, res, next) => {
     try {
@@ -1570,6 +1817,8 @@ router.delete(
   '/sessions/:id/cart/:itemId',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   async (req, res, next) => {
     try {
       const { id: sessionId, itemId } = req.params;
@@ -1616,6 +1865,8 @@ router.get(
   '/sessions/:id/lab-orders',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  authorize('read', 'session', { mode: 'observe' }),
   async (req, res, next) => {
     try {
       const { id: sessionId } = req.params;
@@ -1645,6 +1896,9 @@ router.post(
   '/services/:id/lab-orders',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('service_performed', 'id'),
+  mapLoadedResource('lab_order'),
+  authorize('create', 'lab_order'),
   validate(labOrderCreateSchema),
   async (req, res, next) => {
     try {
@@ -1686,6 +1940,8 @@ router.patch(
   '/lab-orders/:id',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('lab_order', 'id'),
+  authorize('update', 'lab_order'),
   validate(labOrderUpdateSchema),
   async (req, res, next) => {
     try {
@@ -1758,6 +2014,9 @@ router.post(
   '/sessions/:id/attachments/sign',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  mapLoadedResource('attachment'),
+  authorize('create', 'attachment'),
   validate(attachSignSchema),
   async (req, res, next) => {
     try {
@@ -1791,6 +2050,9 @@ router.post(
   '/sessions/:id/attachments',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  mapLoadedResource('attachment'),
+  authorize('create', 'attachment'),
   validate(attachConfirmSchema),
   async (req, res, next) => {
     try {
@@ -1830,6 +2092,9 @@ router.get(
   '/sessions/:id/attachments',
   ...authChain,
   requirePermission(P.APPOINTMENT_VIEW),
+  loadResource('session', 'id'),
+  mapLoadedResource('attachment'),
+  authorize('read', 'attachment'),
   async (req, res, next) => {
     try {
       const sessionId = req.params.id;
@@ -1852,6 +2117,9 @@ router.delete(
   '/sessions/:id/attachments/:attachmentId',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  mapLoadedResource('attachment'),
+  authorize('delete', 'attachment'),
   async (req, res, next) => {
     try {
       const { id: sessionId, attachmentId } = req.params;
@@ -1883,6 +2151,8 @@ router.post(
   '/sessions/:id/pause',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
     try {
@@ -1915,6 +2185,8 @@ router.post(
   '/sessions/:id/resume',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
     try {
@@ -1949,6 +2221,8 @@ router.post(
   '/sessions/:id/abandon',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('session', 'id'),
+  authorize('update', 'session'),
   validate(abandonSessionSchema),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
@@ -2021,6 +2295,8 @@ router.post(
   '/sessions/:id/reopen',
   ...authChain,
   requirePermission(P.CLINIC_MANAGE),
+  loadResource('session', 'id'),
+  authorize('reopen', 'session'),
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
     const sessionId = req.params.id;

@@ -32,7 +32,6 @@ const TABLE_ORDER = [
   'prescriptions',
   'rx_line_items',
   'rbac_audit_log',
-  'break_glass_sessions',
   'activity_log',
 ];
 
