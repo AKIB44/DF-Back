@@ -151,8 +151,9 @@ router.get('/revenue/services', ...authChain, requirePermission(P.ORG_MANAGE), a
          COALESCE(SUM(s.price), 0)::numeric                                 AS total_revenue,
          COALESCE(SUM(s.price) FILTER (WHERE a.created_at >= $2), 0)::numeric AS period_revenue
        FROM services s
+       JOIN clinics c ON c.id = s.clinic_id AND c.org_id = $1
        JOIN appointments a ON a.service_id = s.id AND a.status = 'done' AND a.org_id = $1
-       WHERE s.org_id = $1
+       WHERE 1 = 1
          ${clinicFilter}
        GROUP BY s.id, s.name, s.price
        ORDER BY total_revenue DESC

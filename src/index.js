@@ -172,12 +172,15 @@ app.use('/v1/assistant',                   require('./routes/assistant'));
 app.use('/v1/feature-flags',               require('./routes/feature-flags'));
 app.use('/v1/staff-attrs',                 require('./routes/staff-attrs'));
 app.use('/v1/decision-log',                require('./routes/decision-log'));
+app.use('/v1/platform',                    require('./routes/platform-billing'));
+app.use('/v1/clinic-billing',              require('./routes/clinic-billing'));
 
 // ABAC policy engine — registers v1 policy catalog with the engine at boot.
 // In PR1 the catalog is empty (engine default-denies), so this is a no-op
 // safety hook for future PRs.
 require('./security/policies').registerAllPolicies();
 require('./security/jobs/decision-log-retention').start();
+require('./security/jobs/trial-expiry').start();
 
 // ── Health check (unauthenticated, no sensitive data) ────────────────────────
 app.get('/health', (_, res) => res.json({ ok: true }));

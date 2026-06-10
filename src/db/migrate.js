@@ -93,6 +93,8 @@ const OWNER_REQUIRED = {
   '031_postop_record.sql':                'clinical_session',
   '032_tpa_preauth.sql':                  'clinical_session',
   '059_session_summary_pdf.sql':          'clinical_session',
+  '061_platform_billing.sql':             'clinics',
+  '062_clinic_billing_expense.sql':       'clinics',
 };
 
 async function assertCanRunMigration(client, file) {
@@ -314,6 +316,12 @@ async function isAlreadyApplied(client, file) {
   }
   if (file === '060_idempotency_keys.sql') {
     return tableExists(client, 'idempotency_keys');
+  }
+  if (file === '061_platform_billing.sql') {
+    return tableExists(client, 'subscription_plan');
+  }
+  if (file === '062_clinic_billing_expense.sql') {
+    return tableExists(client, 'clinic_expense');
   }
   return false;
 }

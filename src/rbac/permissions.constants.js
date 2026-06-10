@@ -16,6 +16,7 @@ const P = {
   BILLING_CREATE: 'billing.create',
   BILLING_REFUND: 'billing.refund',
   BILLING_EXPORT: 'billing.export',
+  EXPENSE_MANAGE: 'expense.manage',
 
   INVENTORY_ADJUST: 'inventory.adjust',
 
@@ -33,6 +34,12 @@ const P = {
 
   ORG_MANAGE:      'org.manage',
   PLATFORM_MANAGE: 'platform.manage',
+
+  PLATFORM_PLAN_MANAGE:    'platform.plan.manage',
+  PLATFORM_TENANT_READ:    'platform.tenant.read',
+  PLATFORM_TENANT_MANAGE:  'platform.tenant.manage',
+  PLATFORM_BILLING_READ:   'platform.billing.read',
+  PLATFORM_BILLING_MANAGE: 'platform.billing.manage',
 };
 
 module.exports = P;
