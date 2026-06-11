@@ -69,6 +69,8 @@ function validateUuidParams(req, res, next) {
  */
 function enforceJsonContentType(req, res, next) {
   if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
+    // Multipart binary uploads have their own routes (e.g. patient file uploads).
+    if ((req.originalUrl || '').includes('/files/upload')) return next();
     const ct = req.headers['content-type'] || '';
     if (!ct.includes('application/json')) {
       return res.status(415).json({ error: 'Content-Type must be application/json.' });

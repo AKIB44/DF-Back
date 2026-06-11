@@ -95,6 +95,7 @@ const OWNER_REQUIRED = {
   '059_session_summary_pdf.sql':          'clinical_session',
   '061_platform_billing.sql':             'clinics',
   '062_clinic_billing_expense.sql':       'clinics',
+  '063_patient_file.sql':                 'patients',
 };
 
 async function assertCanRunMigration(client, file) {
@@ -322,6 +323,9 @@ async function isAlreadyApplied(client, file) {
   }
   if (file === '062_clinic_billing_expense.sql') {
     return tableExists(client, 'clinic_expense');
+  }
+  if (file === '063_patient_file.sql') {
+    return tableExists(client, 'patient_file');
   }
   return false;
 }

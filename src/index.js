@@ -151,6 +151,7 @@ app.use('/v1/clinics',       require('./routes/clinics'));
 app.use('/v1/chairs',        require('./routes/chairs'));
 app.use('/v1/services',      require('./routes/services'));
 app.use('/v1/staff',         require('./routes/staff'));
+app.use('/v1/patients/:patientId/files', require('./routes/patient-files'));
 app.use('/v1/patients',      require('./routes/patients'));
 app.use('/v1/appointments',  require('./routes/appointments'));
 app.use('/v1/rx',            require('./routes/rx'));
@@ -187,16 +188,24 @@ app.get('/health', (_, res) => res.json({ ok: true }));
 
 // ── Global error handler — never leak internals in production ────────────────
 app.use((err, req, res, next) => {
+  res.locals.__err = err;
+
+  if (res.headersSent) {
+    const rid = req.id || req.headers['x-request-id'] || '—';
+    console.error(
+      `[ERROR] req=${rid} ${req.method} ${req.originalUrl} — response already sent: ${err.message}`
+    );
+    if (err.code) console.error(`[ERROR] PostgreSQL: code=${err.code} detail=${err.detail || '—'}`);
+    console.error(err.stack);
+    return next(err);
+  }
+
   // CORS errors become 403
   if (err.message?.startsWith('CORS:')) {
     return res.status(403).json({ error: err.message });
   }
 
   const status = err.status || 500;
-  if (status >= 500) {
-    console.error(`[ERROR] ${req.method} ${req.originalUrl} ${status}`);
-    console.error(err.stack);
-  }
 
   // Never expose stack traces or internal error messages in production
   const message = (isProd && status >= 500)

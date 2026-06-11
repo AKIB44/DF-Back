@@ -1,4 +1,21 @@
+const crypto = require('crypto');
 const activityService = require('../activity/activity.service');
+const { runWithQueryLog } = require('../db');
+
+// LOG_LEVEL: silent | error (5xx) | warn (4xx+) | info (one-line all) | debug (full dump)
+const LOG_LEVEL = (process.env.LOG_LEVEL || 'debug').toLowerCase();
+const SLOW_MS = Number(process.env.LOG_SLOW_MS || 3000);
+const RESPONSE_PREVIEW_MAX = Number(process.env.LOG_RESPONSE_PREVIEW_MAX || 500);
+const LEVEL_RANK = { silent: 0, error: 1, warn: 2, info: 3, debug: 4 };
+const logRank = () => LEVEL_RANK[LOG_LEVEL] ?? LEVEL_RANK.info;
+
+// Probe paths — bots/scanners; never dump headers unless LOG_LEVEL=debug
+const QUIET_PATHS = [
+  /^\/health$/i,
+  /^\/v1\/version$/i,
+  /^\/favicon\.ico$/i,
+  /^\/robots\.txt$/i,
+];
 
 const SENSITIVE_KEYS = ['password', 'password_hash', 'token', 'refresh_token', 'secret'];
 
@@ -221,56 +238,309 @@ function buildDetail(method, path, body) {
   return parts.length ? parts.join('  ·  ') : null;
 }
 
+function isQuietPath(path) {
+  return QUIET_PATHS.some((re) => re.test(path));
+}
+
+function shouldLog(status) {
+  const rank = logRank();
+  if (rank === 0) return false;
+  if (status >= 500) return rank >= 1;
+  if (status >= 400) return rank >= 2;
+  return rank >= 3;
+}
+
+function clinicLabel(user) {
+  return user?.clinic_id || user?.active_clinic_id || null;
+}
+
+function formatRoute(req) {
+  if (!req.route) return '— (no route match)';
+  return req.baseUrl ? `${req.baseUrl}${req.route.path}` : req.route.path;
+}
+
+function authHeaderSummary(req) {
+  const h = req.headers.authorization;
+  if (!h) return 'missing';
+  if (h.startsWith('Bearer ')) return `Bearer (${h.length - 7} chars)`;
+  return `${h.split(' ')[0] || 'present'} (non-bearer)`;
+}
+
+function formatBytes(n) {
+  if (n == null || Number.isNaN(n)) return '—';
+  if (n < 1024) return `${n}B`;
+  return `${(n / 1024).toFixed(1)}KB`;
+}
+
+function previewJson(value, max = RESPONSE_PREVIEW_MAX) {
+  if (value == null) return null;
+  try {
+    const raw = typeof value === 'string' ? value : JSON.stringify(value);
+    return raw.length > max ? `${raw.slice(0, max)}…` : raw;
+  } catch {
+    return '[unserializable]';
+  }
+}
+
+function formatPgError(err) {
+  if (!err || !err.code) return null;
+  const lines = [];
+  if (err.code) lines.push(`code=${err.code}`);
+  if (err.detail) lines.push(`detail=${err.detail}`);
+  if (err.hint) lines.push(`hint=${err.hint}`);
+  if (err.table) lines.push(`table=${err.table}`);
+  if (err.constraint) lines.push(`constraint=${err.constraint}`);
+  if (err.column) lines.push(`column=${err.column}`);
+  return lines.length ? lines.join(' | ') : null;
+}
+
+function pickRateLimitHeaders(res) {
+  const names = [
+    'ratelimit-limit', 'ratelimit-remaining', 'ratelimit-reset',
+    'x-ratelimit-limit', 'x-ratelimit-remaining', 'x-ratelimit-reset',
+    'retry-after',
+  ];
+  const out = {};
+  for (const n of names) {
+    const v = res.getHeader(n);
+    if (v != null) out[n] = v;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+function buildExtraDiagnostics(req, res, { status, ms, responseBody, capturedPath }) {
+  const lines = [];
+  const { action, entityType, entityId } = resolveAction(req.method, capturedPath);
+
+  if (req.id) lines.push(['Request-Id', req.id]);
+  lines.push(['Route', formatRoute(req)]);
+
+  if (req.params && Object.keys(req.params).length) {
+    lines.push(['Params', JSON.stringify(req.params)]);
+  }
+
+  const u = req.user;
+  if (u) {
+    if (u.role) lines.push(['Role', u.role]);
+    if (u.type) lines.push(['Actor', u.type]);
+    if (u.is_org_admin) lines.push(['Org-admin', 'true']);
+    if (u.rv != null) lines.push(['Token-rv', String(u.rv)]);
+    if (u.org_id) lines.push(['Org', u.org_id]);
+  }
+
+  if (req.context) {
+    lines.push(['Context', JSON.stringify(req.context)]);
+  }
+
+  const xClinic = req.headers['x-clinic-id'];
+  if (xClinic) lines.push(['X-Clinic-Id', xClinic]);
+
+  const idem = req.headers['idempotency-key'];
+  if (idem) lines.push(['Idempotency', idem]);
+
+  lines.push(['Auth', authHeaderSummary(req)]);
+
+  if (req.headers.origin) lines.push(['Origin', req.headers.origin]);
+  if (req.headers.referer) lines.push(['Referer', req.headers.referer]);
+  if (req.headers['content-type']) lines.push(['Content-Type', req.headers['content-type']]);
+  if (req.headers['content-length']) lines.push(['Content-Length', req.headers['content-length']]);
+
+  if (action) lines.push(['Action', action]);
+  if (entityType) lines.push(['Entity', `${entityType}${entityId ? ` / ${entityId}` : ''}`]);
+
+  if (req.resource) {
+    lines.push(['Resource', JSON.stringify({
+      type: req.resource.type,
+      id: req.resource.id,
+      clinic_id: req.resource.clinic_id,
+      status: req.resource.status,
+    })]);
+  }
+
+  if (req._abacSubject) {
+    lines.push(['ABAC-subject', JSON.stringify({
+      role: req._abacSubject.role,
+      hierarchyLevel: req._abacSubject.hierarchyLevel,
+      specialtyTags: req._abacSubject.specialtyTags,
+      branchId: req._abacSubject.branchId,
+    })]);
+  }
+
+  if (req.abacDecision) {
+    lines.push(['ABAC-decision', JSON.stringify({
+      decision: req.abacDecision.decision,
+      policy: req.abacDecision.policy,
+      reason: req.abacDecision.reason,
+    })]);
+  }
+
+  const respSize = responseBody != null ? Buffer.byteLength(previewJson(responseBody, Infinity) || '', 'utf8') : null;
+  lines.push(['Response-size', formatBytes(respSize)]);
+
+  const rateLimit = pickRateLimitHeaders(res);
+  if (rateLimit) lines.push(['Rate-limit', JSON.stringify(rateLimit)]);
+
+  const tenantStatus = res.getHeader('x-tenant-status');
+  if (tenantStatus) lines.push(['Tenant-status', String(tenantStatus)]);
+
+  const abacWarn = res.getHeader('x-abac-warning');
+  if (abacWarn) lines.push(['ABAC-warning', String(abacWarn)]);
+
+  if (ms >= SLOW_MS) lines.push(['Slow', `yes (>${SLOW_MS}ms)`]);
+
+  if (status >= 400 && responseBody) {
+    const preview = previewJson(responseBody);
+    if (preview) lines.push(['Response', preview]);
+  }
+
+  const err = res.locals?.__err;
+  if (err) {
+    if (err.message) lines.push(['Exception', err.message]);
+    const pg = formatPgError(err);
+    if (pg) lines.push(['PostgreSQL', pg]);
+  }
+
+  if (req._dbLog?.length) {
+    const totalDbMs = req._dbLog.reduce((n, q) => n + (q.ms || 0), 0);
+    lines.push(['DB-queries', `${req._dbLog.length} (${totalDbMs}ms total)`]);
+    for (const [i, q] of req._dbLog.entries()) {
+      if (q.error) {
+        lines.push([`  DB#${i + 1}`, `${q.ms}ms FAIL ${q.code || ''} ${q.error} — ${q.sql}`]);
+      } else {
+        lines.push([`  DB#${i + 1}`, `${q.ms}ms rows=${q.rows ?? '?'} — ${q.sql}`]);
+      }
+    }
+  }
+
+  return { lines, stack: res.locals?.__err?.stack && status >= 500 ? res.locals.__err.stack : null };
+}
+
+function writeRequestLog(req, res, { status, ms, responseBody, capturedPath }) {
+  if (!shouldLog(status)) return;
+
+  // Scanner noise — skip unless explicitly enabled
+  if (isQuietPath(capturedPath) && logRank() < 4 && process.env.LOG_PROBE !== 'true') {
+    return;
+  }
+
+  const ip = extractIp(req);
+  const user = formatRequestUser(req.user);
+  const clinic = clinicLabel(req.user);
+  const ts = new Date().toISOString();
+  const line = `${req.method} ${req.originalUrl} → ${status} ${ms}ms`;
+  const emit = status >= 500 ? console.error.bind(console)
+    : status >= 400 ? console.error.bind(console)
+      : console.log.bind(console);
+
+  const quiet = isQuietPath(capturedPath);
+  const verbose = logRank() >= 4 && !quiet;
+
+  if (!verbose) {
+    const parts = [`[${ts}] ${line}`, `req=${req.id || '?'}`, `ip=${ip || '?'}`];
+    if (user !== '—') parts.push(`user=${user}`);
+    if (clinic) parts.push(`clinic=${clinic}`);
+    if (req.user?.role) parts.push(`role=${req.user.role}`);
+    if (status >= 400 && responseBody?.error) parts.push(`err="${responseBody.error}"`);
+    if (status >= 400 && responseBody?.details) {
+      parts.push(`details=${JSON.stringify(responseBody.details)}`);
+    }
+    const err = res.locals?.__err;
+    if (err?.message) parts.push(`exception="${err.message}"`);
+    if (err?.code) parts.push(`pg=${err.code}`);
+    if (ms >= SLOW_MS) parts.push(`slow=${ms}ms`);
+    emit(parts.join(' | '));
+    if (status >= 500 && err?.stack) console.error(err.stack);
+    return;
+  }
+
+  const queryParams = Object.keys(req.query).length ? req.query : null;
+  const safeHeaders = sanitizeHeaders(req.headers);
+
+  emit('─'.repeat(72));
+  emit(`[${ts}] ${line}`);
+  emit(`  IP         : ${ip || 'unknown'}`);
+  emit(`  User       : ${user}`);
+  if (clinic) emit(`  Clinic     : ${clinic}`);
+  emit(`  User-Agent : ${req.headers['user-agent'] || '—'}`);
+
+  if (queryParams) emit(`  Query      : ${JSON.stringify(queryParams)}`);
+
+  const headerLines = Object.entries(safeHeaders)
+    .map(([k, v]) => `    ${k}: ${v}`)
+    .join('\n');
+  emit(`  Headers    :\n${headerLines}`);
+
+  if (req.method !== 'GET' && req.body && Object.keys(req.body).length) {
+    emit(`  Body       : ${JSON.stringify(sanitizeBody(req.body))}`);
+  }
+
+  if (status >= 400) {
+    if (responseBody?.error) emit(`  Error      : ${responseBody.error}`);
+    if (responseBody?.details) emit(`  Details    : ${JSON.stringify(responseBody.details)}`);
+  }
+
+  const { lines: extras, stack } = buildExtraDiagnostics(req, res, { status, ms, responseBody, capturedPath });
+  if (extras.length) {
+    emit('  Diagnostics:');
+    for (const [label, value] of extras) {
+      emit(`    ${String(label).padEnd(14)}: ${value}`);
+    }
+  }
+  if (stack) console.error(stack);
+
+  emit('─'.repeat(72));
+}
+
 const logger = (req, res, next) => {
   const start = Date.now();
   // Capture early — Express rewrites req.path/req.url when dispatching into sub-routers,
   // so by the time 'finish' fires the path no longer matches the original mount.
   const capturedPath = req.originalUrl.split('?')[0];
 
+  req.id = req.headers['x-request-id'] || crypto.randomUUID();
+  res.setHeader('X-Request-Id', req.id);
+  req._dbLog = [];
+
   const originalJson = res.json.bind(res);
+  const originalSend = res.send.bind(res);
   let responseBody;
   res.json = (body) => {
     // Guard against double-send (e.g. requestTimeout's 503 fires, then a slow
     // handler completes and tries to respond): writing again throws
-    // ERR_HTTP_HEADERS_SENT and crashes the request. Swallow the late write.
-    if (res.headersSent) return res;
+    // ERR_HTTP_HEADERS_SENT and crashes the request.
+    if (res.headersSent) {
+      console.error(
+        `[logger] duplicate response suppressed: ${req.method} ${req.originalUrl} ` +
+        `(request-id=${req.id}, status=${res.statusCode})`
+      );
+      return res;
+    }
     responseBody = body;
     return originalJson(body);
+  };
+  res.send = (body) => {
+    if (res.headersSent) {
+      console.error(
+        `[logger] duplicate send suppressed: ${req.method} ${req.originalUrl} ` +
+        `(request-id=${req.id}, status=${res.statusCode})`
+      );
+      return res;
+    }
+    if (responseBody == null && body != null) {
+      try {
+        responseBody = typeof body === 'string' ? JSON.parse(body) : body;
+      } catch {
+        responseBody = { _raw: String(body).slice(0, RESPONSE_PREVIEW_MAX) };
+      }
+    }
+    return originalSend(body);
   };
 
   res.on('finish', () => {
     const ms     = Date.now() - start;
     const status = res.statusCode;
-    const ip     = extractIp(req);
-    const safeHeaders = sanitizeHeaders(req.headers);
-    const queryParams = Object.keys(req.query).length ? req.query : null;
-    const log = status >= 400 ? console.error.bind(console) : console.log.bind(console);
 
-    log('─'.repeat(72));
-    log(`[${new Date().toISOString()}] ${req.method} ${req.originalUrl} → ${status} (${ms}ms)`);
-    log(`  IP         : ${ip || 'unknown'}`);
-    log(`  User       : ${formatRequestUser(req.user)}`);
-    log(`  User-Agent : ${req.headers['user-agent'] || '—'}`);
-
-    if (queryParams) {
-      log(`  Query      : ${JSON.stringify(queryParams)}`);
-    }
-
-    const headerLines = Object.entries(safeHeaders)
-      .map(([k, v]) => `    ${k}: ${v}`)
-      .join('\n');
-    log(`  Headers    :\n${headerLines}`);
-
-    if (req.method !== 'GET' && req.body && Object.keys(req.body).length) {
-      log(`  Body       : ${JSON.stringify(sanitizeBody(req.body))}`);
-    }
-
-    if (status >= 400) {
-      if (responseBody?.error)   log(`  Error      : ${responseBody.error}`);
-      if (responseBody?.details) log(`  Details    : ${JSON.stringify(responseBody.details)}`);
-    }
-
-    log('─'.repeat(72));
+    writeRequestLog(req, res, { status, ms, responseBody, capturedPath });
 
     {
       const { action, entityType, entityId } = resolveAction(req.method, capturedPath);
@@ -297,7 +567,7 @@ const logger = (req, res, next) => {
     }
   });
 
-  next();
+  runWithQueryLog(req._dbLog, () => next());
 };
 
 module.exports = logger;
