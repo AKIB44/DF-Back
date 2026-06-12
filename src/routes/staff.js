@@ -9,6 +9,7 @@ const auditMw      = require('../audit/audit.middleware');
 const { requirePermission } = require('../rbac/require-permission.middleware');
 const P            = require('../rbac/permissions.constants');
 const { bumpVersion } = require('../rbac/permission.cache');
+const { getPresignedUrl } = require('../services/s3Service');
 
 const router = express.Router();
 
@@ -37,6 +38,10 @@ const patchSchema = Joi.object({
   is_active: Joi.boolean().required(),
 });
 
+const transferSchema = Joi.object({
+  clinic_id: Joi.string().uuid().required(),
+});
+
 router.use(authenticate, tenantScope, auditMw, requirePermission(P.STAFF_MANAGE));
 
 router.get('/', async (req, res, next) => {
@@ -46,6 +51,75 @@ router.get('/', async (req, res, next) => {
       [req.user.clinic_id]
     );
     res.json({ users: result.rows });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// List active clinics in the requester's org — populates the "Transfer to clinic" dialog.
+router.get('/clinics', async (req, res, next) => {
+  try {
+    const { rows } = await db.query(
+      `SELECT id, name, city, address, logo_s3_key FROM clinics
+        WHERE org_id = $1 AND is_active = true
+        ORDER BY name`,
+      [req.context.orgId]
+    );
+    const clinics = await Promise.all(rows.map(async (c) => ({
+      id: c.id, name: c.name, city: c.city, address: c.address,
+      logo_url: c.logo_s3_key ? await getPresignedUrl({ key: c.logo_s3_key, expiresIn: 900 }) : null,
+    })));
+    res.json({ clinics });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Assign / transfer a user to another clinic in the same org.
+// Gated by staff.manage (held only by org_admin & clinic_admin).
+router.post('/:id/transfer-clinic', validate(transferSchema), async (req, res, next) => {
+  const orgId = req.context.orgId;
+  const { clinic_id } = req.body;
+  try {
+    const u = await db.query(
+      `SELECT id, clinic_id FROM users WHERE id = $1 AND org_id = $2`,
+      [req.params.id, orgId]
+    );
+    if (!u.rows.length) return res.status(404).json({ error: 'User not found in your organization' });
+    const oldClinic = u.rows[0].clinic_id;
+
+    const c = await db.query(
+      `SELECT id, name FROM clinics WHERE id = $1 AND org_id = $2 AND is_active = true`,
+      [clinic_id, orgId]
+    );
+    if (!c.rows.length) return res.status(400).json({ error: 'Target clinic is not in your organization' });
+    if (oldClinic === clinic_id) return res.status(409).json({ error: 'User is already assigned to that clinic' });
+
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        `UPDATE users SET clinic_id = $1, branch_id = $1 WHERE id = $2`,
+        [clinic_id, req.params.id]
+      );
+      // Move the user's active role grants to the new clinic so their access follows them.
+      await client.query(
+        `UPDATE user_roles SET clinic_id = $1
+          WHERE user_id = $2 AND clinic_id = $3 AND (valid_to IS NULL OR valid_to > now())`,
+        [clinic_id, req.params.id, oldClinic]
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK');
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    await bumpVersion(req.params.id); // invalidate cached permissions for the moved user
+
+    const { rows } = await db.query(`SELECT ${SAFE_COLS} FROM users WHERE id = $1`, [req.params.id]);
+    res.json({ ok: true, user: { ...rows[0], clinic_name: c.rows[0].name } });
   } catch (err) {
     next(err);
   }

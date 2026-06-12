@@ -31,6 +31,8 @@ router.get('/users', async (req, res, next) => {
     const { rows } = await db.query(
       `SELECT u.id, u.first_name, u.last_name, u.email, u.designation,
               u.role AS legacy_role, u.is_active,
+              u.clinic_id,
+              c.name AS clinic_name,
               r.id   AS role_id,
               r.code AS role_code,
               r.name AS role_name,
@@ -41,6 +43,7 @@ router.get('/users', async (req, res, next) => {
                  AND (po.valid_to IS NULL OR po.valid_to > now())
               ) AS override_count
        FROM users u
+       LEFT JOIN clinics c ON c.id = u.clinic_id
        LEFT JOIN user_roles ur
               ON ur.user_id = u.id
              AND ur.clinic_id = $1
