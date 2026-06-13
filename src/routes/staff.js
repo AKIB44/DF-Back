@@ -67,7 +67,9 @@ router.get('/clinics', async (req, res, next) => {
     );
     const clinics = await Promise.all(rows.map(async (c) => ({
       id: c.id, name: c.name, city: c.city, address: c.address,
-      logo_url: c.logo_s3_key ? await getPresignedUrl({ key: c.logo_s3_key, expiresIn: 900 }) : null,
+      logo_url: c.logo_s3_key
+        ? await getPresignedUrl({ key: c.logo_s3_key, expiresIn: 900, responseCacheControl: 'private, max-age=900' })
+        : null,
     })));
     res.json({ clinics });
   } catch (err) {

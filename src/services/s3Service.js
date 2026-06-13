@@ -89,10 +89,13 @@ async function getPresignedPutUrl({ key, bucket, contentType, expiresIn = 300 })
   return getSignedUrl(getS3Client(), command, { expiresIn });
 }
 
-async function getPresignedUrl({ key, bucket, expiresIn = DEFAULT_SIGNED_URL_TTL_SECONDS }) {
+async function getPresignedUrl({ key, bucket, expiresIn = DEFAULT_SIGNED_URL_TTL_SECONDS, responseCacheControl }) {
   const command = new GetObjectCommand({
     Bucket: getBucket(bucket),
     Key: normalizeKey(key),
+    // Makes S3 return a Cache-Control header so the browser caches the object
+    // (e.g. clinic logos) instead of re-downloading it on every view.
+    ...(responseCacheControl ? { ResponseCacheControl: responseCacheControl } : {}),
   });
 
   return getSignedUrl(getS3Client(), command, { expiresIn });

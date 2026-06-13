@@ -99,6 +99,74 @@ function resolveAction(method, path) {
   if (method === 'POST' && seg[0] === 'rbac' && seg[1] === 'users' && seg[2] && seg[3] === 'overrides')
     return { action: 'Set permission override', entityType: 'user', entityId: seg[2] };
 
+  // ── Treatment plans (before the generic /patients rules) ──────────────────
+  if (method === 'POST' && seg[0] === 'treatment-plans' && seg[1] && seg[2] === 'items')
+    return { action: 'Added treatment plan item', entityType: 'treatment_plan', entityId: seg[1] };
+  if (seg[0] === 'treatment-plan-items' && seg[1]) {
+    if (method === 'PATCH')  return { action: 'Updated treatment plan item', entityType: 'treatment_plan_item', entityId: seg[1] };
+    if (method === 'DELETE') return { action: 'Removed treatment plan item', entityType: 'treatment_plan_item', entityId: seg[1] };
+  }
+  if (seg[0] === 'patients' && seg[2] === 'treatment-plans') {
+    if (method === 'POST')                      return { action: 'Created treatment plan', entityType: 'treatment_plan', entityId: seg[1] };
+    if (method === 'PUT' || method === 'PATCH') return { action: 'Updated treatment plan', entityType: 'treatment_plan', entityId: seg[1] };
+  }
+
+  // ── Patient files / scans (before the generic /patients rules) ────────────
+  if (seg[0] === 'patients' && seg[2] === 'files') {
+    if (method === 'POST'   && seg[3] === 'upload') return { action: 'Uploaded patient file', entityType: 'patient_file', entityId: seg[1] };
+    if (method === 'POST')                          return { action: 'Added patient file',    entityType: 'patient_file', entityId: seg[1] };
+    if (method === 'DELETE')                        return { action: 'Deleted patient file',  entityType: 'patient_file', entityId: seg[3] || seg[1] };
+  }
+
+  // ── Staff clinic transfer (before the generic /staff rules) ───────────────
+  if (method === 'POST' && seg[0] === 'staff' && seg[1] && seg[2] === 'transfer-clinic')
+    return { action: 'Transferred staff to another clinic', entityType: 'staff', entityId: seg[1] };
+
+  // ── Treatment session workflow ────────────────────────────────────────────
+  if (method === 'POST' && seg[0] === 'appointments' && seg[1] && seg[2] === 'start-treatment')
+    return { action: 'Started treatment session', entityType: 'session', entityId: seg[1] };
+
+  if (seg[0] === 'sessions' && seg[1]) {
+    const sid = seg[1];
+    const sub = seg[2];
+    if (!sub && (method === 'PATCH' || method === 'PUT'))
+      return { action: 'Updated session', entityType: 'session', entityId: sid };
+    const SESSION_ACTIONS = {
+      'end-treatment':  'Ended treatment & sealed session',
+      'summary-pdf':    'Generated treatment summary PDF',
+      'pause':          'Paused session',
+      'resume':         'Resumed session',
+      'abandon':        'Abandoned session',
+      'reopen':         'Reopened session',
+      'chart':          'Updated tooth chart',
+      'examination':    'Updated examination',
+      'notes':          'Updated clinical notes',
+      'prescriptions':  'Added prescription to session',
+      'investigations': 'Ordered investigation',
+      'lab-orders':     'Created lab order',
+      'cart':           'Updated treatment cart',
+      'tpa':            'Updated TPA / insurance',
+      'consents':       'Recorded consent',
+      'preop':          'Updated pre-op checklist',
+      'postop':         'Updated post-op record',
+      'variance':       'Recorded cost variance',
+    };
+    if (sub === 'diagnoses')   return { action: method === 'DELETE' ? 'Removed diagnosis' : 'Added diagnosis', entityType: 'session', entityId: sid };
+    if (sub === 'services')    return { action: method === 'DELETE' ? 'Removed service from session' : 'Added service to session', entityType: 'session', entityId: sid };
+    if (sub === 'attachments') return { action: method === 'DELETE' ? 'Deleted session attachment' : 'Uploaded session attachment', entityType: 'session', entityId: sid };
+    if (SESSION_ACTIONS[sub])  return { action: SESSION_ACTIONS[sub], entityType: 'session', entityId: sid };
+  }
+
+  if (seg[0] === 'investigations' && seg[1]) {
+    if (seg[2] === 'receive') return { action: 'Received investigation result', entityType: 'investigation', entityId: seg[1] };
+    if (seg[2] === 'sign')    return { action: 'Signed investigation report',   entityType: 'investigation', entityId: seg[1] };
+    if (method === 'DELETE')  return { action: 'Deleted investigation',         entityType: 'investigation', entityId: seg[1] };
+  }
+  if (seg[0] === 'lab-orders' && seg[1] && (method === 'PATCH' || method === 'PUT'))
+    return { action: 'Updated lab order', entityType: 'lab_order', entityId: seg[1] };
+  if (seg[0] === 'tpa' && seg[1])
+    return { action: 'Updated TPA / insurance', entityType: 'tpa', entityId: seg[1] };
+
   if (seg[0] === 'patients' && seg[1]) {
     if (method === 'PUT' || method === 'PATCH') return { action: 'Updated patient', entityType: 'patient', entityId: seg[1] };
     if (method === 'DELETE')                    return { action: 'Deleted patient', entityType: 'patient', entityId: seg[1] };
@@ -137,6 +205,68 @@ function resolveAction(method, path) {
   if (seg[0] === 'clinic' && (method === 'PUT' || method === 'PATCH'))
     return { action: 'Updated clinic profile', entityType: 'clinic', entityId: null };
 
+  // ── Inventory ──────────────────────────────────────────────────────────────
+  if (seg[0] === 'inventory') {
+    if (method === 'POST' && seg[1] === 'items' && seg[2] && seg[3] === 'batches')
+      return { action: 'Added stock batch', entityType: 'inventory_item', entityId: seg[2] };
+    if (seg[1] === 'items' && seg[2]) {
+      if (method === 'PATCH' || method === 'PUT') return { action: 'Updated inventory item', entityType: 'inventory_item', entityId: seg[2] };
+      if (method === 'DELETE')                    return { action: 'Deleted inventory item', entityType: 'inventory_item', entityId: seg[2] };
+    }
+    if (method === 'POST' && seg[1] === 'items')     return { action: 'Added inventory item',  entityType: 'inventory_item', entityId: null };
+    if (method === 'POST' && seg[1] === 'movements') return { action: 'Recorded stock movement', entityType: 'inventory', entityId: null };
+    if (seg[1] === 'purchase-orders' && seg[2] && seg[3] === 'status')
+      return { action: 'Updated purchase order status', entityType: 'purchase_order', entityId: seg[2] };
+    if (seg[1] === 'purchase-orders' && seg[2] && (method === 'PATCH' || method === 'PUT'))
+      return { action: 'Updated purchase order', entityType: 'purchase_order', entityId: seg[2] };
+    if (method === 'POST' && seg[1] === 'purchase-orders')
+      return { action: 'Created purchase order', entityType: 'purchase_order', entityId: null };
+  }
+
+  // ── Clinic billing (expenses) ────────────────────────────────────────────
+  if (seg[0] === 'clinic-billing' && seg[1] === 'expenses') {
+    if (method === 'POST')                      return { action: 'Added expense',   entityType: 'expense', entityId: null };
+    if (method === 'PATCH' || method === 'PUT') return { action: 'Updated expense', entityType: 'expense', entityId: seg[2] };
+    if (method === 'DELETE')                    return { action: 'Deleted expense', entityType: 'expense', entityId: seg[2] };
+  }
+
+  // ── Specialty cases (handles /specialty/* and /specialty/<module>/*) ──────
+  if (seg[0] === 'specialty') {
+    const ci = seg.indexOf('cases');
+    if (ci !== -1) {
+      const caseId  = seg[ci + 1] || null;
+      const caseSub = seg[ci + 2] || null;
+      if (caseSub === 'milestones') return { action: 'Added case milestone', entityType: 'specialty_case', entityId: caseId };
+      if (caseSub === 'visits')     return { action: 'Logged case visit',    entityType: 'specialty_case', entityId: caseId };
+      if (caseSub === 'status')     return { action: 'Updated case status',  entityType: 'specialty_case', entityId: caseId };
+      if (method === 'POST' && !caseId)            return { action: 'Created specialty case', entityType: 'specialty_case', entityId: null };
+      if (method === 'PATCH' || method === 'PUT')  return { action: 'Updated specialty case', entityType: 'specialty_case', entityId: caseId };
+      if (method === 'DELETE')                     return { action: 'Deleted specialty case', entityType: 'specialty_case', entityId: caseId };
+    }
+  }
+
+  // ── Org administration ─────────────────────────────────────────────────────
+  if (seg[0] === 'org' && seg[1] === 'roles') {
+    if (method === 'POST')                      return { action: 'Created role', entityType: 'role', entityId: null };
+    if (method === 'PUT' || method === 'PATCH') return { action: 'Updated role', entityType: 'role', entityId: seg[2] };
+    if (method === 'DELETE')                    return { action: 'Deleted role', entityType: 'role', entityId: seg[2] };
+  }
+  if (seg[0] === 'org' && seg[1] === 'hr' && seg[2] === 'staff' && seg[3]) {
+    if (seg[4] === 'reset-password') return { action: 'Reset staff password', entityType: 'staff', entityId: seg[3] };
+    if (method === 'PATCH')          return { action: 'Updated staff (HR)',   entityType: 'staff', entityId: seg[3] };
+  }
+  if (seg[0] === 'feature-flags' && (method === 'POST' || method === 'PUT' || method === 'PATCH'))
+    return { action: 'Updated feature flag', entityType: 'feature_flag', entityId: seg[1] || null };
+  if (seg[0] === 'release-notes') {
+    if (method === 'POST')                      return { action: 'Published release note', entityType: 'release_note', entityId: null };
+    if (method === 'PUT' || method === 'PATCH') return { action: 'Updated release note',   entityType: 'release_note', entityId: seg[1] };
+    if (method === 'DELETE')                    return { action: 'Deleted release note',   entityType: 'release_note', entityId: seg[1] };
+  }
+  if (seg[0] === 'staff-attrs' && (method === 'POST' || method === 'PUT' || method === 'PATCH'))
+    return { action: 'Updated staff attributes', entityType: 'staff', entityId: seg[1] || null };
+  if (seg[0] === 'platform' && ['POST', 'PUT', 'PATCH', 'DELETE'].includes(method))
+    return { action: 'Platform / subscription change', entityType: 'platform', entityId: seg[1] || null };
+
   if (seg[0] === 'auth' && seg[1] === 'login'  && method === 'POST') return { action: 'User login',  entityType: 'auth', entityId: null };
   if (seg[0] === 'auth' && seg[1] === 'logout' && method === 'POST') return { action: 'User logout', entityType: 'auth', entityId: null };
 
@@ -157,6 +287,24 @@ function buildDetail(method, path, body) {
       const procs = body.items.filter(i => i.item_type === 'procedure').length;
       parts.push(`${body.items.length} item${body.items.length !== 1 ? 's' : ''} (${meds} medicine${meds !== 1 ? 's' : ''}, ${procs} procedure${procs !== 1 ? 's' : ''})`);
     }
+  }
+
+  if (seg[0] === 'treatment-plans' || seg[0] === 'treatment-plan-items' ||
+      (seg[0] === 'patients' && seg[2] === 'treatment-plans')) {
+    if (body.title)    parts.push(`Title: ${body.title}`);
+    if (body.priority) parts.push(`Priority: ${body.priority}`);
+    if (body.status)   parts.push(`Status: ${body.status}`);
+    if (Array.isArray(body.tooth_numbers) && body.tooth_numbers.length) parts.push(`Teeth: ${body.tooth_numbers.join(', ')}`);
+    if (body.cost_min != null || body.cost_max != null) parts.push(`Cost: ${body.cost_min ?? '?'}–${body.cost_max ?? '?'}`);
+    if (body.patient_facing_notes) parts.push(`Notes: ${String(body.patient_facing_notes).slice(0, 80)}`);
+  }
+
+  if (seg[0] === 'sessions') {
+    if (body.status)       parts.push(`Status: ${body.status}`);
+    if (body.reason)       parts.push(`Reason: ${String(body.reason).slice(0, 80)}`);
+    if (body.notes)        parts.push(`Notes: ${String(body.notes).slice(0, 80)}`);
+    if (body.service_id)   parts.push(`Service: ${body.service_id}`);
+    if (body.tooth_number) parts.push(`Tooth: ${body.tooth_number}`);
   }
 
   if (seg[0] === 'staff') {
@@ -571,3 +719,6 @@ const logger = (req, res, next) => {
 };
 
 module.exports = logger;
+// Exposed for unit tests (does not affect `app.use(logger)`).
+module.exports.resolveAction = resolveAction;
+module.exports.buildDetail = buildDetail;
