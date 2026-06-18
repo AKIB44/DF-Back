@@ -18,6 +18,8 @@
  * clustered deployments replace with Redis counters.
  */
 
+const { verifyAccess } = require('../auth/jwt.service');
+
 const BAN_TTL_MS        = 60 * 60 * 1000;  // 1 hour ban
 const BAN_STRIKES       = 5;               // rate-limit violations before ban
 const BURST_WINDOW_MS   = 5_000;           // 5 s sliding window
@@ -47,6 +49,18 @@ function getIp(req) {
   return req.ip || req.socket?.remoteAddress || 'unknown';
 }
 
+/** Org/platform admins with a valid Bearer token bypass all DDoS layers. */
+function isDdosExempt(req) {
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) return false;
+  try {
+    const payload = verifyAccess(header.slice(7));
+    return payload.is_org_admin === true || payload.type === 'platform_admin';
+  } catch {
+    return false;
+  }
+}
+
 function isBanned(ip) {
   const entry = banStore.get(ip);
   if (!entry) return false;
@@ -71,6 +85,7 @@ function ban(ip) {
  * Records a strike against the IP; bans it once BAN_STRIKES is reached.
  */
 function recordRateLimitViolation(req) {
+  if (isDdosExempt(req)) return;
   const ip = getIp(req);
   const entry = burstStore.get(ip) ?? { count: 0, windowStart: Date.now(), strikes: 0 };
   entry.strikes = (entry.strikes ?? 0) + 1;
@@ -85,6 +100,8 @@ function recordRateLimitViolation(req) {
  * Enforces ban list, burst detection, and scan/probe detection.
  */
 function ddosGuard(req, res, next) {
+  if (isDdosExempt(req)) return next();
+
   const ip = getIp(req);
 
   // ── 1. Ban list check ───────────────────────────────────────────────────────
@@ -150,4 +167,4 @@ function authRateLimitHandler(req, res) {
   res.status(429).json({ error: 'Too many login attempts. Please try again in 15 minutes.' });
 }
 
-module.exports = { ddosGuard, rateLimitHandler, authRateLimitHandler };
+module.exports = { ddosGuard, rateLimitHandler, authRateLimitHandler, isDdosExempt };

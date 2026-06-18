@@ -25,6 +25,12 @@ const FLAGS = [
     description: 'Global mic + clinic-wide voice commands ("Friday, open patient Ravi").',
     default:     false,
   },
+  {
+    key:         'gesture_viewer.enabled',
+    label:       'Gesture 3D Viewer',
+    description: 'Hand-gesture-controlled 3D model viewer for patient scans (STL/GLB/PLY/OBJ).',
+    default:     false,
+  },
 ];
 
 router.get('/', async (req, res, next) => {

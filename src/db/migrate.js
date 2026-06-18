@@ -327,6 +327,68 @@ async function isAlreadyApplied(client, file) {
   if (file === '063_patient_file.sql') {
     return tableExists(client, 'patient_file');
   }
+  if (file === '064_marketing_foundation.sql') {
+    return tableExists(client, 'mkt_pipeline_leads');
+  }
+  if (file === '065_marketing_feedback.sql') {
+    return tableExists(client, 'mkt_caller_feedback');
+  }
+  if (file === '066_marketing_call_logs.sql') {
+    return tableExists(client, 'mkt_call_logs');
+  }
+  if (file === '067_marketing_callbacks.sql') {
+    return tableExists(client, 'mkt_callbacks');
+  }
+  if (file === '068_marketing_enquiries.sql') {
+    return tableExists(client, 'mkt_digital_enquiries');
+  }
+  if (file === '069_marketing_seed.sql') {
+    // Demo seed — re-run is harmless (self-guards), but skip once it's in.
+    const { rows } = await client.query(
+      "SELECT 1 FROM mkt_campaigns WHERE name = 'Summer Whitening Offer' LIMIT 1"
+    );
+    return rows.length > 0;
+  }
+  if (file === '070_marketing_scheduled_calls.sql') {
+    return tableExists(client, 'mkt_scheduled_calls');
+  }
+  if (file === '071_marketing_seed_calls.sql') {
+    const { rows } = await client.query(
+      "SELECT 1 FROM mkt_scheduled_calls WHERE google_event_id = 'stub_demo_today' LIMIT 1"
+    );
+    return rows.length > 0;
+  }
+  if (file === '072_marketing_expenses.sql') {
+    return tableExists(client, 'mkt_expenses');
+  }
+  if (file === '073_marketing_seed_expenses.sql') {
+    const { rows } = await client.query("SELECT 1 FROM mkt_expenses LIMIT 1");
+    return rows.length > 0;
+  }
+  if (file === '074_marketing_lead_finder.sql') {
+    return tableExists(client, 'mkt_scraped_leads');
+  }
+  if (file === '075_marketing_places_guardrails.sql') {
+    return tableExists(client, 'mkt_places_usage');
+  }
+  if (file === '076_marketing_segments_promo.sql') {
+    return tableExists(client, 'mkt_segments');
+  }
+  if (file === '077_marketing_seed_segments_promo.sql') {
+    const { rows } = await client.query("SELECT 1 FROM mkt_segments LIMIT 1");
+    return rows.length > 0;
+  }
+  if (file === '078_marketing_onboarding_pitch.sql') {
+    return tableExists(client, 'mkt_onboarding_steps');
+  }
+  if (file === '079_marketing_seed_onboarding_pitch.sql') {
+    const { rows } = await client.query("SELECT 1 FROM mkt_onboarding_steps LIMIT 1");
+    return rows.length > 0;
+  }
+  if (file === '080_gesture_viewer_flag.sql') {
+    const { rows } = await client.query("SELECT 1 FROM feature_flags WHERE flag_key = 'gesture_viewer.enabled' LIMIT 1");
+    return rows.length > 0;
+  }
   return false;
 }
 

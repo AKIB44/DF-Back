@@ -5,7 +5,7 @@ const helmet    = require('helmet');
 const rateLimit = require('express-rate-limit');
 const logger    = require('./middleware/logger');
 const xss       = require('./middleware/xss');
-const { ddosGuard, rateLimitHandler, authRateLimitHandler } = require('./middleware/ddos');
+const { ddosGuard, rateLimitHandler, authRateLimitHandler, isDdosExempt } = require('./middleware/ddos');
 const {
   blockMethodOverride,
   blockPathTraversal,
@@ -103,6 +103,7 @@ const apiLimiter = rateLimit({
   max:             200,
   standardHeaders: true,
   legacyHeaders:   false,
+  skip:            isDdosExempt,
   handler:         rateLimitHandler,
 });
 app.use('/v1', apiLimiter);
@@ -114,7 +115,7 @@ const authLimiter = rateLimit({
   max:             10,
   standardHeaders: true,
   legacyHeaders:   false,
-  skip:            () => process.env.NODE_ENV === 'test',
+  skip:            (req) => process.env.NODE_ENV === 'test' || isDdosExempt(req),
   handler:         authRateLimitHandler,
 });
 app.use('/v1/auth/login',         authLimiter);
@@ -128,6 +129,7 @@ const rxActionLimiter = rateLimit({
   max:             20,
   standardHeaders: true,
   legacyHeaders:   false,
+  skip:            isDdosExempt,
   handler:         rateLimitHandler,
 });
 app.use('/v1/rx/prescriptions', rxActionLimiter);
@@ -175,6 +177,7 @@ app.use('/v1/staff-attrs',                 require('./routes/staff-attrs'));
 app.use('/v1/decision-log',                require('./routes/decision-log'));
 app.use('/v1/platform',                    require('./routes/platform-billing'));
 app.use('/v1/clinic-billing',              require('./routes/clinic-billing'));
+app.use('/v1/marketing',                   require('./routes/marketing'));
 
 // ABAC policy engine — registers v1 policy catalog with the engine at boot.
 // In PR1 the catalog is empty (engine default-denies), so this is a no-op
