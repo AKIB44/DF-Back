@@ -35,7 +35,7 @@ async function todayUsage(clinicId) {
   );
   return rows[0] || { search_count: 0, api_calls: 0, last_search_at: null };
 }
-
+ 
 // Enforce caps/cooldown/dedupe and RESERVE a search slot. Returns a token to pass
 // to release(), plus the remaining call budget for the meter. Throws GuardError.
 async function reserve(clinicId, key) {

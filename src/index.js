@@ -67,7 +67,7 @@ app.use(cors({
     cb(new Error(`CORS: origin '${origin}' is not allowed`));
   },
   methods:          ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders:   ['Content-Type', 'Authorization', 'X-Clinic-Id'],
+  allowedHeaders:   ['Content-Type', 'Authorization', 'X-Clinic-Id', 'X-Biometric-Token'],
   exposedHeaders:   ['RateLimit-Limit', 'RateLimit-Remaining', 'RateLimit-Reset'],
   credentials:      true,
   maxAge:           600, // preflight cache: 10 minutes

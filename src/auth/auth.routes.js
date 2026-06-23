@@ -43,4 +43,7 @@ router.post('/mfa/enable',   authenticate,               mfaCtrl.enableMfa);
 router.post('/mfa/disable',  authenticate,               mfaCtrl.disableMfa);
 router.post('/mfa/challenge',                            mfaCtrl.challengeMfa);
 
+// ── WebAuthn biometric (Face ID / Touch ID) step-up ────────────────────────────
+router.use('/webauthn', require('./webauthn.routes'));
+
 module.exports = router;

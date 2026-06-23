@@ -3,11 +3,12 @@ const db         = require('../db');
 const authenticate   = require('../middleware/authenticate');
 const tenantScope    = require('../rbac/tenant-scope.middleware');
 const { requirePermission } = require('../rbac/require-permission.middleware');
+const requireBiometric = require('../middleware/require-biometric');
 const P          = require('../rbac/permissions.constants');
 
 const router = express.Router();
 
-router.get('/', authenticate, tenantScope, requirePermission(P.AUDIT_VIEW), async (req, res, next) => {
+router.get('/', authenticate, requireBiometric('audit_unlock'), tenantScope, requirePermission(P.AUDIT_VIEW), async (req, res, next) => {
   try {
     const clinicId = req.user.clinic_id;
     const page     = Math.max(1, parseInt(req.query.page  || '1',  10));
