@@ -69,9 +69,13 @@ async function registerOptions(req, res, next) {
       userName: req.user.email || userId,
       userDisplayName: req.user.display_name || req.user.email || 'User',
       attestationType: 'none',
+      // Force the on-device biometric (Touch ID / Face ID / Windows Hello) and
+      // emit the `client-device` hint so the browser skips the cross-device
+      // passkey chooser (QR / security key / "use another device").
+      preferredAuthenticatorType: 'localDevice',
       excludeCredentials: creds.map((c) => ({
         id: c.credential_id,
-        transports: c.transports || undefined,
+        transports: (c.transports && c.transports.length) ? c.transports : ['internal'],
       })),
       authenticatorSelection: {
         authenticatorAttachment: 'platform', // built-in biometric (Touch ID / Face ID)
@@ -164,9 +168,11 @@ async function authOptions(req, res, next) {
     const options = await generateAuthenticationOptions({
       rpID: rpID(req),
       userVerification: 'required',
+      // `internal` keeps the prompt on the platform authenticator (Touch ID /
+      // Face ID) instead of offering the hybrid/QR cross-device passkey flow.
       allowCredentials: creds.map((c) => ({
         id: c.credential_id,
-        transports: c.transports || undefined,
+        transports: (c.transports && c.transports.length) ? c.transports : ['internal'],
       })),
     });
     await saveChallenge(userId, options.challenge, 'authenticate');
