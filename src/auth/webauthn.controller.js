@@ -13,19 +13,19 @@ const ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:4200')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
 // The browser requires rpID to be a registrable suffix of the page's origin.
-// Resolve the origin for THIS request from its Origin header (validated against
-// the allow-list) rather than assuming ORIGINS[0] — otherwise a dev origin left
-// first in ALLOWED_ORIGINS (e.g. http://localhost:4200) leaks "localhost" into
-// production and the authenticator rejects it. WEBAUTHN_RP_ID still overrides
-// for apex-vs-www / shared-suffix setups.
-function originFor(req) {
-  const o = req && req.headers && req.headers.origin;
-  if (o && ORIGINS.includes(o)) return o;
-  return ORIGINS[0];
-}
+// Resolution order: (1) WEBAUTHN_RP_ID env — explicit, always wins; (2) the
+// hostname of THIS request's Origin header — the page the credential binds to;
+// (3) ORIGINS[0] only as a last resort when no Origin header is present.
+// Deriving straight from the Origin header (not an allow-list lookup) avoids the
+// trailing-slash / scheme-mismatch trap that silently fell back to "localhost".
+// It is safe: the browser still enforces rpID ⊆ the real page origin, so a
+// spoofed Origin cannot forge a credential for another domain, and verify still
+// checks `expectedOrigin: ORIGINS`.
 function rpID(req) {
   if (process.env.WEBAUTHN_RP_ID) return process.env.WEBAUTHN_RP_ID;
-  try { return new URL(originFor(req)).hostname; } catch { return 'localhost'; }
+  const origin = req && req.headers && req.headers.origin;
+  if (origin) { try { return new URL(origin).hostname; } catch { /* malformed header */ } }
+  try { return new URL(ORIGINS[0]).hostname; } catch { return 'localhost'; }
 }
 const RP_NAME = process.env.WEBAUTHN_RP_NAME || 'DentaFlow';
 // Grant is re-minted on every visit to the gated screen; lifetime only needs to
@@ -56,6 +56,8 @@ async function takeChallenge(userId, purpose) {
 async function registerOptions(req, res, next) {
   try {
     const userId = req.user.sub;
+    console.log('[webauthn] register/options rpID=%s origin=%s rpEnv=%s',
+      rpID(req), req.headers.origin || '-', process.env.WEBAUTHN_RP_ID || '-');
     const { rows: creds } = await db.query(
       `SELECT credential_id, transports FROM user_webauthn_credential WHERE user_id = $1`,
       [userId]
@@ -151,6 +153,8 @@ async function deleteCredential(req, res, next) {
 async function authOptions(req, res, next) {
   try {
     const userId = req.user.sub;
+    console.log('[webauthn] auth/options rpID=%s origin=%s rpEnv=%s',
+      rpID(req), req.headers.origin || '-', process.env.WEBAUTHN_RP_ID || '-');
     const { rows: creds } = await db.query(
       `SELECT credential_id, transports FROM user_webauthn_credential WHERE user_id = $1`,
       [userId]
