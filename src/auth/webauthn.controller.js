@@ -8,14 +8,24 @@ const {
 const db = require('../db');
 
 // ── Relying-Party config ──────────────────────────────────────────────────────
-// Origins the browser may run on (reuse the CORS allow-list). rpID is the
-// registrable domain — derived from the first origin, overridable via env.
+// Origins the browser may run on (reuse the CORS allow-list).
 const ORIGINS = (process.env.ALLOWED_ORIGINS || 'http://localhost:4200')
   .split(',').map((s) => s.trim()).filter(Boolean);
 
-function rpID() {
+// The browser requires rpID to be a registrable suffix of the page's origin.
+// Resolve the origin for THIS request from its Origin header (validated against
+// the allow-list) rather than assuming ORIGINS[0] — otherwise a dev origin left
+// first in ALLOWED_ORIGINS (e.g. http://localhost:4200) leaks "localhost" into
+// production and the authenticator rejects it. WEBAUTHN_RP_ID still overrides
+// for apex-vs-www / shared-suffix setups.
+function originFor(req) {
+  const o = req && req.headers && req.headers.origin;
+  if (o && ORIGINS.includes(o)) return o;
+  return ORIGINS[0];
+}
+function rpID(req) {
   if (process.env.WEBAUTHN_RP_ID) return process.env.WEBAUTHN_RP_ID;
-  try { return new URL(ORIGINS[0]).hostname; } catch { return 'localhost'; }
+  try { return new URL(originFor(req)).hostname; } catch { return 'localhost'; }
 }
 const RP_NAME = process.env.WEBAUTHN_RP_NAME || 'DentaFlow';
 // Grant is re-minted on every visit to the gated screen; lifetime only needs to
@@ -52,7 +62,7 @@ async function registerOptions(req, res, next) {
     );
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
-      rpID: rpID(),
+      rpID: rpID(req),
       userID: new TextEncoder().encode(userId),
       userName: req.user.email || userId,
       userDisplayName: req.user.display_name || req.user.email || 'User',
@@ -82,7 +92,7 @@ async function registerVerify(req, res, next) {
       response: req.body.response,
       expectedChallenge,
       expectedOrigin: ORIGINS,
-      expectedRPID: rpID(),
+      expectedRPID: rpID(req),
       requireUserVerification: true,
     });
 
@@ -148,7 +158,7 @@ async function authOptions(req, res, next) {
     if (!creds.length) return res.status(409).json({ error: 'not_enrolled' });
 
     const options = await generateAuthenticationOptions({
-      rpID: rpID(),
+      rpID: rpID(req),
       userVerification: 'required',
       allowCredentials: creds.map((c) => ({
         id: c.credential_id,
@@ -179,7 +189,7 @@ async function authVerify(req, res, next) {
       response,
       expectedChallenge,
       expectedOrigin: ORIGINS,
-      expectedRPID: rpID(),
+      expectedRPID: rpID(req),
       requireUserVerification: true,
       credential: {
         id: stored.credential_id,
