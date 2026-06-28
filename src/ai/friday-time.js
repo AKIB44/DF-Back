@@ -58,7 +58,7 @@ function getTimeContext(now = new Date(), tz = DEFAULT_TZ) {
   };
 }
 
-/** Who Friday is talking to: first name, Dr. {name}, Doctor, or Boss. */
+/** Who Friday is talking to: first name, Dr. {name}, or Doctor (never "Boss"). */
 function resolveGreetingAddressee(user = {}) {
   const role    = String(user.role || '').toLowerCase();
   const first   = String(user.first_name || '').trim();
@@ -69,8 +69,7 @@ function resolveGreetingAddressee(user = {}) {
     if (role === 'doctor') return `Dr. ${short}`;
     return short;
   }
-  if (role === 'doctor') return 'Doctor';
-  return 'Boss';
+  return 'Doctor';
 }
 
 function userContextFromReq(jwtUser = {}) {
@@ -88,28 +87,35 @@ const GREETINGS = {
     'Morning, {addressee}. What should we tackle first?',
     '{addressee}, good morning — I\'m listening.',
     'Hey {addressee} — fresh day at the clinic. What\'s up?',
+    'Morning, {addressee}. Coffee\'s your problem; the schedule\'s mine. Where do we start?',
+    'Up and at it, {addressee}? Good — I never sleep anyway. What\'s first?',
   ],
   afternoon: [
     'Good afternoon, {addressee} — what\'s next on the chair?',
     'Afternoon, {addressee}. Say the word.',
     '{addressee}, good afternoon — how can I help?',
     'Hey {addressee} — still with you. What do you need?',
+    'Afternoon slump hitting, {addressee}? I\'ll carry the load — what do you need?',
+    'Halfway through, {addressee}. Want me to pull the next patient or read you the schedule?',
   ],
   evening: [
     'Good evening, {addressee} — still here. What do you need?',
     'Evening, {addressee} — wrapping up or one more chart?',
     '{addressee}, good evening — I\'ve got you.',
     'Hey {addressee} — long day. What can I pull up?',
+    'Evening, {addressee}. You look tired — well, you sound tired. One more thing, or are we done?',
   ],
   night: [
     '{addressee} — late shift? I\'m here if you need one more thing.',
     'Still at it, {addressee}? What can I do?',
     '{addressee}, burning the midnight oil — say the word.',
+    'It\'s late, {addressee}. I don\'t judge... much. What do you need before bed?',
   ],
   default: [
     'Yes {addressee} — what do you want me to do?',
     'At your service, {addressee}. What\'s next?',
     'Ready, {addressee} — just say the word.',
+    'I\'m all ears, {addressee}. Well, microphone. What do you need?',
   ],
 };
 

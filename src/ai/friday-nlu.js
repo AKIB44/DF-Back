@@ -596,22 +596,58 @@ const REPLIES = {
   patient_no_name:   "I didn't catch the patient name.",
   billing_no_patient: 'Which patient should I check billing for?',
   greeting: [
-    "Yes boss, what do you want me to do?",
-    "At your service boss — what's next?",
-    "Yes boss, I'm listening.",
-    "Ready boss, just say the word.",
+    "Yes {addressee}, what do you want me to do?",
+    "At your service, {addressee} — what's next?",
+    "Yes {addressee}, I'm listening.",
+    "Ready {addressee}, just say the word.",
   ],
-  thanks:  ["You're welcome.", 'Anytime.', 'Happy to help.', 'My pleasure.'],
-  bye:     ["Goodbye! I'll be right here when you need me.", 'Catch you later.', 'Take care, doctor.'],
+  thanks: [
+    "You're welcome, {addressee} — what's next?",
+    "Anytime. Another one?",
+    "Happy to help. Need anything else, {addressee}?",
+    "My pleasure, {addressee}.",
+  ],
+  bye: [
+    "Goodbye, {addressee} — I'll be right here when you need me.",
+    "Catch you later, {addressee}.",
+    "Take care, {addressee}. Try not to miss me too much.",
+    "Logging today as 'survived'. See you, {addressee}.",
+  ],
   sarcasm: [
-    "I'd love to help, but witty comebacks aren't billable yet.",
+    "I'd love to help, {addressee}, but witty comebacks aren't billable yet.",
     "Funny. Now — anything I can actually do for you?",
     "I'm allergic to small talk. Try \"open patient\" instead.",
+    "Bold of you to roast the only one here who never forgets a chart number.",
+    "I'd take offense, but my ego is stored in read-only memory.",
+    "Cute. Should I file that under 'feedback' or 'noise', {addressee}?",
+    "I can diagnose sarcasm — treating it is above my pay grade. Got a real command?",
+    "Ha. Now ask me something with a patient name in it, {addressee}.",
+    "That's adorable. Shall we get back to actual dentistry?",
   ],
   proactive: [
     "Got it — I'll keep an eye on that and nudge you when something changes.",
-    "Understood boss. I'll watch for that and update you.",
-    "Sure boss, I'll stay on top of that for you.",
+    "Understood, {addressee}. I'll watch for that and update you.",
+    "Sure {addressee}, I'll stay on top of that. Anything else I should watch?",
+  ],
+  identity: [
+    "I'm Friday — your clinic's voice in the machine. Less Iron Man, more root canals. What do you need, {addressee}?",
+    "Friday: part receptionist, part chart-wrangler, zero coffee breaks. Where shall we start, {addressee}?",
+    "I'm Friday, {addressee} — I run your schedule, find patients, and judge your handwriting in silence. What's first?",
+  ],
+  help: [
+    "I can open patients, book appointments, check dues, read your schedule, and navigate the app. Try \"open patient Ravi\" or \"how many patients today\". What'll it be, {addressee}?",
+    "Commands I actually enjoy: \"book a cleaning for Asha\", \"due amount for Paras\", \"go to inventory\". Want to try one, {addressee}?",
+    "Patients, bookings, billing, navigation, schedule — say it like you mean it. What do you want first, {addressee}?",
+  ],
+  howareyou: [
+    "Running at 100%, no caffeine required — more than I can say for the waiting room. How are YOU holding up, {addressee}?",
+    "Flawless, as always. Ask me something hard, {addressee}, I'm bored.",
+    "I'm a voice assistant, {addressee} — no feelings, just uptime, and mine's perfect. What do you need?",
+  ],
+  compliment: [
+    "Flattery noted and filed under 'obviously'. What's next, {addressee}?",
+    "I'd blush if I had cheeks. Back to work, {addressee}?",
+    "Careful {addressee}, I'll start charging for compliments. What can I pull up?",
   ],
   behaviour: {
     speak_louder:       "I'll speak up.",
@@ -757,6 +793,14 @@ function buildIntentResult(raw, best) {
       return { ...base, message: "I can't see the sky from in here — but I can tell you who's next in the chair." };
     case 'smalltalk.sarcasm':
       return { ...base, message: pick(REPLIES.sarcasm) };
+    case 'smalltalk.identity':
+      return { ...base, message: pick(REPLIES.identity) };
+    case 'smalltalk.help':
+      return { ...base, message: pick(REPLIES.help) };
+    case 'smalltalk.howareyou':
+      return { ...base, message: pick(REPLIES.howareyou) };
+    case 'smalltalk.compliment':
+      return { ...base, message: pick(REPLIES.compliment) };
     default:
       return { ...base, intent: 'unknown', message: REPLIES.unknown };
   }

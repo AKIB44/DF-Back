@@ -54,6 +54,11 @@ router.post('/interpret', requirePermission(P.PATIENT_VIEW), async (req, res, ne
     }
 
     const userCtx = userContextFromReq(req.user);
+    // Personalise every reply: {addressee} → first name / "Dr. X" / "Doctor".
+    const replyAddressee = resolveGreetingAddressee(userCtx);
+    if (result.message && result.message.includes('{addressee}')) {
+      result = { ...result, message: result.message.replace(/\{addressee\}/g, replyAddressee) };
+    }
     if (result.intent === 'smalltalk.greeting') {
       const addressee = resolveGreetingAddressee(userCtx);
       result = {

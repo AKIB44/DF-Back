@@ -187,7 +187,11 @@ require('./security/jobs/decision-log-retention').start();
 require('./security/jobs/trial-expiry').start();
 
 // ── Health check (unauthenticated, no sensitive data) ────────────────────────
-app.get('/health', (_, res) => res.json({ ok: true }));
+// Exposed at root and under /v1 so the SPA can probe liveness through the same
+// proxy path it uses for the API (used by the frontend "server unavailable" page).
+const healthHandler = (_, res) => res.json({ ok: true, ts: Date.now() });
+app.get('/health', healthHandler);
+app.get('/v1/health', healthHandler);
 
 // ── Global error handler — never leak internals in production ────────────────
 app.use((err, req, res, next) => {

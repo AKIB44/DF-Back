@@ -2509,12 +2509,15 @@ router.post(
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
   async (req, res, next) => {
-    const { s3Key, uploadUrl } = await s3Service.getPresignedPutUrl(
-      `consents/${req.params.id}/${Date.now()}_sig.png`,
-      'image/png',
-      300
-    );
-    return res.json({ upload_url: uploadUrl, s3_key: s3Key });
+    try {
+      const s3Key = `consents/${req.params.id}/${Date.now()}_sig.png`;
+      const uploadUrl = await getPresignedPutUrl({
+        key:         s3Key,
+        contentType: 'image/png',
+        expiresIn:   300,
+      });
+      return res.json({ upload_url: uploadUrl, s3_key: s3Key });
+    } catch (err) { next(err); }
   }
 );
 
@@ -2542,6 +2545,16 @@ router.post(
       const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
       if (!session) return next(createError(404, 'Session not found'));
       if (session.sealed_at) return next(createError(409, 'Session is sealed'));
+
+      // Guard the optional catalog-service link so a bad id returns a clean 400
+      // instead of a raw FK violation (consent_record.service_id → services.id).
+      if (req.body.service_id) {
+        const svc = await db.query(
+          `SELECT 1 FROM services WHERE id = $1 AND clinic_id = $2`,
+          [req.body.service_id, clinicId]
+        );
+        if (!svc.rows[0]) return next(createError(400, 'Linked service not found for this clinic'));
+      }
 
       // hash the s3 key as a lightweight integrity marker
       const crypto = require('crypto');

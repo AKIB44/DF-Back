@@ -78,14 +78,15 @@ const LAB_INVENTORY = [
 
 const training = {
   _meta: {
-    note: 'DentaFlow Friday NLU v4 — personas, dental/medical corpus, time queries, agent proactive, behaviour control. Rebuild: node scripts/build-friday-training.js',
+    note: 'DentaFlow Friday NLU v5 — personas, dental/medical corpus, time queries, agent proactive, behaviour control, interactive smalltalk (identity/help/how-are-you/compliment). Rebuild: node scripts/build-friday-training.js',
     confidence_floor: 0.18,
-    version: '4.0',
+    version: '5.0',
     updated: new Date().toISOString().slice(0, 10),
     intents: [
       'patient.find', 'billing.patient', 'navigate', 'appointment.book', 'schedule.summary', 'schedule.time',
       'agent.proactive', 'behaviour', 'smalltalk.greeting', 'smalltalk.time', 'smalltalk.weather',
       'smalltalk.sarcasm', 'smalltalk.thanks', 'smalltalk.bye', 'app.exit',
+      'smalltalk.identity', 'smalltalk.help', 'smalltalk.howareyou', 'smalltalk.compliment',
     ],
   },
   'patient.find': [],
@@ -103,6 +104,10 @@ const training = {
   'smalltalk.sarcasm': [],
   'smalltalk.thanks': [],
   'smalltalk.bye': [],
+  'smalltalk.identity': [],
+  'smalltalk.help': [],
+  'smalltalk.howareyou': [],
+  'smalltalk.compliment': [],
 };
 
 const pf = training['patient.find'];
@@ -308,7 +313,7 @@ training['behaviour'].push(
 training['smalltalk.greeting'].push(
   'friday', 'hi friday', 'hello friday', 'hey friday', 'good morning friday',
   'good afternoon friday', 'good evening friday', 'namaste friday', 'yo friday',
-  'how are you doing', 'how are you today', 'are you there', 'wake up friday',
+  'are you there', 'wake up friday',
   'ready friday', 'lets begin', 'ok friday', 'friday you up', 'morning friday',
   'good morning', 'good afternoon', 'good evening', 'morning team', 'afternoon friday',
   'evening friday', 'hi friday good morning', 'hello friday good afternoon',
@@ -404,6 +409,44 @@ training['smalltalk.thanks'].push(
 training['smalltalk.bye'].push(
   'bye friday', 'goodbye', 'see you later', 'thats all for today', 'stop friday',
   'go offline', 'signing off', 'done for today', 'logging off',
+);
+
+// ── Identity (who/what are you) ──
+training['smalltalk.identity'].push(
+  'who are you', 'what are you', 'whats your name', 'what is your name',
+  'introduce yourself', 'tell me about yourself', 'are you friday', 'who is friday',
+  'who made you', 'who built you', 'are you an ai', 'are you a robot assistant',
+  'are you jarvis', 'are you like jarvis', 'whats your purpose', 'why are you here',
+  'what kind of assistant are you', 'are you a real assistant', 'what is friday',
+  'describe yourself', 'who am i talking to',
+);
+
+// ── Help / capabilities (what can you do) ──
+training['smalltalk.help'].push(
+  'what can you do', 'what can you help with', 'how can you help', 'help me',
+  'help', 'i need help', 'what commands can i use', 'show me commands',
+  'list your commands', 'what should i say', 'what can i ask you', 'what can i ask',
+  'how do i use you', 'give me examples', 'what are my options', 'guide me',
+  'instructions please', 'what can i do here', 'what are you capable of',
+  'what are your features', 'teach me how to use you', 'what do you know',
+);
+
+// ── How are you (interactive small talk) ──
+training['smalltalk.howareyou'].push(
+  'how are you', 'how are you doing', 'how are you today', 'how is it going',
+  'hows it going', 'how do you feel', 'are you ok', 'are you okay', 'you good',
+  'you doing ok', 'hows your day', 'how have you been', 'whats up friday',
+  'sup friday', 'you doing alright', 'how are you friday', 'how you doing',
+  'everything good friday', 'feeling good today',
+);
+
+// ── Compliments (sarcastic-humble comebacks) ──
+training['smalltalk.compliment'].push(
+  'you are amazing', 'youre amazing', 'youre the best', 'you are the best',
+  'i love you friday', 'youre brilliant', 'youre so smart', 'youre helpful',
+  'youre awesome', 'you are awesome', 'i like you friday', 'youre a genius',
+  'youre great', 'you are great friday', 'youre incredible', 'youre wonderful',
+  'love working with you', 'youre fantastic', 'best assistant ever',
 );
 
 // Dedupe

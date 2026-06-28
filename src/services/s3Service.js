@@ -80,11 +80,15 @@ async function uploadBuffer({
 }
 
 async function getPresignedPutUrl({ key, bucket, contentType, expiresIn = 300 }) {
+  // NOTE: do NOT set ServerSideEncryption here. It would add
+  // `x-amz-server-side-encryption` to the signed headers, forcing the browser to
+  // send that exact header on the PUT — which it doesn't, so S3 rejects the
+  // upload with a signature mismatch. Buckets encrypt at rest by default
+  // (SSE-S3), so objects stay encrypted without signing the header.
   const command = new PutObjectCommand({
     Bucket:      getBucket(bucket),
     Key:         normalizeKey(key),
     ContentType: contentType,
-    ServerSideEncryption: 'AES256',
   });
   return getSignedUrl(getS3Client(), command, { expiresIn });
 }

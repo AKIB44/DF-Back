@@ -13,6 +13,19 @@ function requirePermission(code, opts = {}) {
       return res.status(400).json({ error: 'no_active_clinic' });
     }
 
+    // Org admins are the top of their tenant and implicitly hold every org
+    // permission (mirrors the org_admin role, which is granted all permissions
+    // except platform.manage). Bypass the role lookup so a missing or stale role
+    // assignment / cached permission set can't lock an org admin out of their
+    // own org. Clinic context (above) and step-up (below) still apply.
+    if (req.user?.is_org_admin && code !== 'platform.manage') {
+      if (opts.sensitive && !req.user.stepUpAt) {
+        return res.status(401).json({ error: 'step_up_required' });
+      }
+      req.permissionGranted = { code, scope: 'org' };
+      return next();
+    }
+
     try {
       const perms   = await resolvePermissions(userId, clinicId);
       const granted = perms[code];

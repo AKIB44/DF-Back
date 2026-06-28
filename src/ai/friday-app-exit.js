@@ -45,7 +45,7 @@ function sarcasticLeavingEarly(ctx) {
   return pick([
     `Leaving early at ${time}? Fine — logging you out and sending you to login.`,
     `Half-day at ${time}? Bold. Session ended — login page is next.`,
-    `Early exit at ${time}? OK boss. You're out — see you after you sign in again.`,
+    `Early exit at ${time}? OK doctor. You're out — see you after you sign in again.`,
     `Clocking out early? Logout done. Go home; the login screen awaits.`,
     `Heading out early? Fine. I've logged you out — don't chart from the car park.`,
   ]);
@@ -56,7 +56,7 @@ function sarcasticExitApp(ctx) {
     'Fine. Logging you out — taking you to the login page now.',
     `Alright, out at ${ctx.time_label}. Session cleared — login screen next.`,
     'Whatever you say. Logged out — redirecting to login.',
-    'OK boss. You\'re logged out. Login page loading.',
+    'OK doctor. You\'re logged out. Login page loading.',
   ]);
 }
 

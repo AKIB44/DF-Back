@@ -228,7 +228,17 @@ async function myPermissions(req, res, next) {
 
     const clinicId = req.query.clinicId || req.context?.clinicId;
     const permissions = await resolvePermissions(req.user.sub, clinicId);
-    if (req.user.is_org_admin) permissions['org.manage'] = { scope: 'org' };
+    if (req.user.is_org_admin) {
+      permissions['org.manage'] = { scope: 'org' };
+      // Org admins implicitly hold every org permission — mirror the
+      // requirePermission bypass so the UI doesn't hide features they can use.
+      const { rows: allPerms } = await db.query(
+        `SELECT code, default_scope FROM permissions WHERE code <> 'platform.manage'`
+      );
+      for (const p of allPerms) {
+        if (!permissions[p.code]) permissions[p.code] = { scope: p.default_scope || 'org' };
+      }
+    }
 
     // ── ABAC manifest extension (PRD §9.1) ────────────────────────────────
     const subject = await buildSubject(req);
