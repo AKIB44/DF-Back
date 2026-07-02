@@ -1879,9 +1879,10 @@ router.get(
       if (!session.rows[0]) return next(createError(404, 'Session not found'));
 
       const { rows } = await db.query(
-        `SELECT lo.*, sp.service_name
+        `SELECT lo.*, s.name AS service_name
            FROM lab_order lo
            LEFT JOIN service_performed sp ON sp.id = lo.service_id
+           LEFT JOIN services s ON s.id = sp.service_id
           WHERE lo.session_id=$1 AND lo.clinic_id=$2
           ORDER BY lo.created_at ASC`,
         [sessionId, clinicId]

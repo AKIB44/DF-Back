@@ -2,7 +2,7 @@ const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const db     = require('../db');
 const { signTokens, verifyRefresh, hashToken, decodeExp, SESSION_SECS } = require('./jwt.service');
-const { checkIsOrgAdmin, getAvailableClinics } = require('./auth.helpers');
+const { checkIsOrgAdmin, isOrgAdminCached, getAvailableClinics } = require('./auth.helpers');
 const { issueMfaToken } = require('./mfa.controller');
 const { bumpVersion } = require('../rbac/permission.cache');
 const { sendOtp }     = require('../services/fast2sms');
@@ -228,7 +228,9 @@ async function myPermissions(req, res, next) {
 
     const clinicId = req.query.clinicId || req.context?.clinicId;
     const permissions = await resolvePermissions(req.user.sub, clinicId);
-    if (req.user.is_org_admin) {
+    // Trust the DB, not the (possibly stale) JWT claim.
+    const orgAdmin = req.user.is_org_admin || await isOrgAdminCached(req.user.sub);
+    if (orgAdmin) {
       permissions['org.manage'] = { scope: 'org' };
       // Org admins implicitly hold every org permission — mirror the
       // requirePermission bypass so the UI doesn't hide features they can use.

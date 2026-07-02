@@ -18,6 +18,12 @@ const {
 const { initDatabase } = require('./db/startup');
 
 const app = express();
+
+// API responses are dynamic — disable ETag so Express never answers a
+// conditional GET with 304. A 304 has no body and Angular's HttpClient treats
+// it as an error (its success range is 200–299), which broke session/treatment
+// loads that revalidated a cached GET.
+app.set('etag', false);
 const isProd = process.env.NODE_ENV === 'production';
 
 // Trust the first proxy hop (nginx, ALB, Cloudflare) so req.ip reflects
@@ -107,6 +113,13 @@ const apiLimiter = rateLimit({
   handler:         rateLimitHandler,
 });
 app.use('/v1', apiLimiter);
+
+// Belt-and-suspenders: tell browsers/proxies not to cache or revalidate dynamic
+// API responses (prevents any 304 leaking to the SPA).
+app.use('/v1', (req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 
 // ── Auth rate limiter — 10 attempts per 15 minutes per IP ────────────────────
 // authRateLimitHandler counts double strikes so auth brute-force bans faster.

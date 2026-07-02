@@ -14,6 +14,21 @@ async function checkIsOrgAdmin(userId) {
   return rows.length > 0;
 }
 
+// Short-lived cache so permission checks can re-derive org-admin status from the
+// DB (authoritative) without a query per request. Fixes stale JWT `is_org_admin`
+// claims (e.g. an account promoted to org admin after its token was issued).
+const _orgAdminMemo = new Map(); // userId → { at, val }
+const ORG_ADMIN_TTL_MS = 60 * 1000;
+
+async function isOrgAdminCached(userId) {
+  if (!userId) return false;
+  const cached = _orgAdminMemo.get(userId);
+  if (cached && Date.now() - cached.at < ORG_ADMIN_TTL_MS) return cached.val;
+  const val = await checkIsOrgAdmin(userId);
+  _orgAdminMemo.set(userId, { at: Date.now(), val });
+  return val;
+}
+
 async function getAvailableClinics(userId) {
   const { rows } = await db.query(
     `SELECT DISTINCT clinic_id FROM user_roles
@@ -25,4 +40,4 @@ async function getAvailableClinics(userId) {
   return rows.map(r => r.clinic_id);
 }
 
-module.exports = { checkIsOrgAdmin, getAvailableClinics };
+module.exports = { checkIsOrgAdmin, isOrgAdminCached, getAvailableClinics };

@@ -1,4 +1,5 @@
 const { resolvePermissions } = require('./permission.resolver');
+const { isOrgAdminCached } = require('../auth/auth.helpers');
 
 function requirePermission(code, opts = {}) {
   return async (req, res, next) => {
@@ -31,6 +32,15 @@ function requirePermission(code, opts = {}) {
       const granted = perms[code];
 
       if (!granted) {
+        // Before denying, re-derive org-admin from the DB (authoritative) — the
+        // JWT `is_org_admin` claim can be stale (e.g. promoted after login).
+        if (code !== 'platform.manage' && await isOrgAdminCached(userId)) {
+          if (opts.sensitive && !req.user.stepUpAt) {
+            return res.status(401).json({ error: 'step_up_required' });
+          }
+          req.permissionGranted = { code, scope: 'org' };
+          return next();
+        }
         if (req.audit) {
           req.audit.write({ action: code, result: 'denied' }).catch(() => {});
         }
