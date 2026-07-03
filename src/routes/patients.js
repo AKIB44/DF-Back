@@ -19,6 +19,18 @@ const patientSchema = Joi.object({
   address:          Joi.string().optional().allow(''),
   age:              Joi.number().integer().min(0).max(150).optional(),
   clinical_history: Joi.string().optional().allow(''),
+  // medical flags
+  blood_group:              Joi.string().valid('A+','A-','B+','B-','AB+','AB-','O+','O-').optional().allow(null,''),
+  is_smoker:                Joi.boolean().optional(),
+  is_diabetic:              Joi.boolean().optional(),
+  is_hypertensive:          Joi.boolean().optional(),
+  is_pregnant:              Joi.boolean().optional(),
+  is_on_blood_thinner:      Joi.boolean().optional(),
+  known_allergies:          Joi.string().optional().allow(null,''),
+  emergency_contact_name:   Joi.string().optional().allow(null,''),
+  emergency_contact_phone:  Joi.string().optional().allow(null,''),
+  preferred_language:       Joi.string().optional().allow(null,''),
+  occupation:               Joi.string().optional().allow(null,''),
 });
 
 router.use(authenticate, tenantScope, auditMw);
@@ -63,7 +75,10 @@ router.get('/', requirePermission(P.PATIENT_VIEW), async (req, res, next) => {
 
 router.post('/', requirePermission(P.PATIENT_CREATE), validate(patientSchema), async (req, res, next) => {
   try {
-    const { name, phone, email, dob, gender, address, age, clinical_history } = req.body;
+    const { name, phone, email, dob, gender, address, age, clinical_history,
+            blood_group, is_smoker, is_diabetic, is_hypertensive, is_pregnant,
+            is_on_blood_thinner, known_allergies, emergency_contact_name,
+            emergency_contact_phone, preferred_language, occupation } = req.body;
 
     // Duplicate guard: only block when BOTH phone and name already exist on
     // this clinic. A shared phone with a different name is allowed so family
@@ -83,9 +98,19 @@ router.post('/', requirePermission(P.PATIENT_CREATE), validate(patientSchema), a
     }
 
     const result = await db.query(
-      `INSERT INTO patients (clinic_id, name, phone, email, dob, gender, address, age, clinical_history)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [req.user.clinic_id, name, phone, email || null, dob || null, gender || null, address || null, age ?? null, clinical_history || null]
+      `INSERT INTO patients
+         (clinic_id, name, phone, email, dob, gender, address, age, clinical_history,
+          blood_group, is_smoker, is_diabetic, is_hypertensive, is_pregnant,
+          is_on_blood_thinner, known_allergies, emergency_contact_name,
+          emergency_contact_phone, preferred_language, occupation)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+       RETURNING *`,
+      [req.user.clinic_id, name, phone, email || null, dob || null, gender || null,
+       address || null, age ?? null, clinical_history || null,
+       blood_group || null, is_smoker ?? false, is_diabetic ?? false,
+       is_hypertensive ?? false, is_pregnant ?? false, is_on_blood_thinner ?? false,
+       known_allergies || null, emergency_contact_name || null,
+       emergency_contact_phone || null, preferred_language || null, occupation || null]
     );
     res.status(201).json({ patient: result.rows[0] });
   } catch (err) {
@@ -253,11 +278,25 @@ router.get('/:id', requirePermission(P.PATIENT_VIEW), async (req, res, next) => 
 
 router.put('/:id', requirePermission(P.PATIENT_UPDATE), validate(patientSchema), async (req, res, next) => {
   try {
-    const { name, phone, email, dob, gender, address, age, clinical_history } = req.body;
+    const { name, phone, email, dob, gender, address, age, clinical_history,
+            blood_group, is_smoker, is_diabetic, is_hypertensive, is_pregnant,
+            is_on_blood_thinner, known_allergies, emergency_contact_name,
+            emergency_contact_phone, preferred_language, occupation } = req.body;
     const result = await db.query(
-      `UPDATE patients SET name=$1, phone=$2, email=$3, dob=$4, gender=$5, address=$6, age=$7, clinical_history=$8
-       WHERE id=$9 AND clinic_id=$10 RETURNING *`,
-      [name, phone, email || null, dob || null, gender || null, address || null, age ?? null, clinical_history || null, req.params.id, req.user.clinic_id]
+      `UPDATE patients SET
+         name=$1, phone=$2, email=$3, dob=$4, gender=$5, address=$6, age=$7,
+         clinical_history=$8, blood_group=$9, is_smoker=$10, is_diabetic=$11,
+         is_hypertensive=$12, is_pregnant=$13, is_on_blood_thinner=$14,
+         known_allergies=$15, emergency_contact_name=$16, emergency_contact_phone=$17,
+         preferred_language=$18, occupation=$19
+       WHERE id=$20 AND clinic_id=$21 RETURNING *`,
+      [name, phone, email || null, dob || null, gender || null, address || null,
+       age ?? null, clinical_history || null, blood_group || null,
+       is_smoker ?? false, is_diabetic ?? false, is_hypertensive ?? false,
+       is_pregnant ?? false, is_on_blood_thinner ?? false, known_allergies || null,
+       emergency_contact_name || null, emergency_contact_phone || null,
+       preferred_language || null, occupation || null,
+       req.params.id, req.user.clinic_id]
     );
     if (!result.rows.length) return res.status(404).json({ error: 'Patient not found' });
     res.json({ patient: result.rows[0] });
