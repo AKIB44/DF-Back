@@ -1106,14 +1106,31 @@ router.post(
   async (req, res, next) => {
     const { orgId, clinicId, userId } = req.context;
     const { patientId } = req.params;
-    const { title = 'Treatment Plan' } = req.body;
+    const { title = 'Treatment Plan', id } = req.body;
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (id != null && !UUID_RE.test(id)) return next(createError(400, 'Invalid plan id'));
     try {
+      // COALESCE lets the client mint the id (offline-first: the id exists in the
+      // UI before the request reaches the server). ON CONFLICT DO NOTHING makes a
+      // replayed offline create idempotent — we then return the existing,
+      // tenant-scoped row instead of erroring on the primary key.
       const { rows } = await db.query(
-        `INSERT INTO treatment_plan (org_id, clinic_id, patient_id, title, created_by, updated_by)
-         VALUES ($1,$2,$3,$4,$5,$5) RETURNING *`,
-        [orgId, clinicId, patientId, title, userId]
+        `INSERT INTO treatment_plan (id, org_id, clinic_id, patient_id, title, created_by, updated_by)
+         VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$6)
+         ON CONFLICT (id) DO NOTHING
+         RETURNING *`,
+        [id || null, orgId, clinicId, patientId, title, userId]
       );
-      return res.status(201).json({ plan: rows[0] });
+      let plan = rows[0];
+      if (!plan && id) {
+        const { rows: existing } = await db.query(
+          `SELECT * FROM treatment_plan WHERE id=$1 AND org_id=$2 AND clinic_id=$3 AND deleted_at IS NULL`,
+          [id, orgId, clinicId]
+        );
+        plan = existing[0];
+        if (!plan) return next(createError(409, 'Plan id already in use'));
+      }
+      return res.status(201).json({ plan });
     } catch (err) { next(err); }
   }
 );
@@ -1171,6 +1188,7 @@ router.get(
 
 // ── POST /treatment-plans/:planId/items ───────────────────────────────────────
 const planItemSchema = Joi.object({
+  id:                   Joi.string().uuid().optional(),
   service_id:           Joi.string().uuid().required(),
   linked_diagnosis_id:  Joi.string().uuid().optional(),
   tooth_numbers:        Joi.array().items(Joi.number().integer()).default([]),
@@ -1200,14 +1218,18 @@ router.post(
       );
       if (!planRows.length) return next(createError(404, 'Treatment plan not found'));
 
+      // Client-minted id (offline-first) via COALESCE; ON CONFLICT DO NOTHING
+      // makes a replayed offline create idempotent.
       const { rows } = await db.query(
         `INSERT INTO treatment_plan_item
-           (org_id, clinic_id, plan_id, service_id, linked_diagnosis_id,
+           (id, org_id, clinic_id, plan_id, service_id, linked_diagnosis_id,
             tooth_numbers, estimated_sessions, cost_min, cost_max,
             priority, patient_facing_notes, created_by, updated_by)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
+         VALUES (COALESCE($1, gen_random_uuid()),$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13)
+         ON CONFLICT (id) DO NOTHING
          RETURNING *`,
         [
+          b.id || null,
           orgId, clinicId, planId, b.service_id,
           b.linked_diagnosis_id || null,
           b.tooth_numbers, b.estimated_sessions,
@@ -1216,8 +1238,17 @@ router.post(
           userId,
         ]
       );
+      let item = rows[0];
+      if (!item && b.id) {
+        const { rows: existing } = await db.query(
+          `SELECT * FROM treatment_plan_item WHERE id=$1 AND org_id=$2 AND clinic_id=$3 AND deleted_at IS NULL`,
+          [b.id, orgId, clinicId]
+        );
+        item = existing[0];
+        if (!item) return next(createError(409, 'Item id already in use'));
+      }
       const { rows: svcRows } = await db.query(`SELECT name FROM services WHERE id=$1`, [b.service_id]);
-      return res.status(201).json({ item: { ...rows[0], service_name: svcRows[0]?.name } });
+      return res.status(201).json({ item: { ...item, service_name: svcRows[0]?.name } });
     } catch (err) { next(err); }
   }
 );
