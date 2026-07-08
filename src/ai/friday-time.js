@@ -110,6 +110,14 @@ const GREETINGS = {
     'Still at it, {addressee}? What can I do?',
     '{addressee}, burning the midnight oil — say the word.',
     'It\'s late, {addressee}. I don\'t judge... much. What do you need before bed?',
+    'It\'s {time}, {addressee}. The teeth can wait till morning — but fine, what do you need?',
+    '{addressee}, even the autoclave has clocked out. Respect for the dedication — what\'s next?',
+    'Working at {time}? {addressee}, you\'re either very dedicated or very behind. Either way, I\'ve got you.',
+    'The clinic is empty, the chairs are sleeping, and yet here we are, {addressee}. Let\'s make it count.',
+    '{addressee}, night owls get things done — and worse posture. Sit up, then tell me what you need.',
+    'Honestly, {addressee}? This dedication deserves a raise. I\'d write to management, but you are management. What\'s next?',
+    'One more chart, {addressee}, then home — deal? I\'ll hold you to it. What do you need?',
+    '{addressee}, you and I are the only ones still on. Lucky for you, I don\'t get tired. Go ahead.',
   ],
   default: [
     'Yes {addressee} — what do you want me to do?',
@@ -154,9 +162,36 @@ function workaholicMessage(ctx = getTimeContext(), user = {}) {
     case 'evening':
       return `${name}, it's evening already. I'll stay sharp — say log out when you're done.`;
     default:
-      return `${name} — late hours. Workaholic noted; rest counts too.`;
+      return pick([
+        `${name} — late hours. Workaholic noted; rest counts too.`,
+        `${name}, workaholic mode at this hour? Bold. I'll keep up — you keep hydrated.`,
+        `Fine, ${name} — grind mode on. But when the sun comes up, we're renegotiating.`,
+      ]);
   }
 }
+
+// Late-night flavour for common replies — sarcasm with genuine encouragement.
+// Used by the NLU when time_context.night is true.
+const NIGHT_REPLIES = {
+  thanks: [
+    "You're welcome, {addressee}. Now that's the last one, right? ...Right?",
+    'Anytime, {addressee} — my night rates are the same as my day rates: free.',
+    "Happy to help, {addressee}. You're doing great — even the coffee gave up hours ago.",
+    "My pleasure. For the record, {addressee}, you're the hardest-working human I monitor.",
+  ],
+  bye: [
+    'Finally! Goodnight, {addressee} — you\'ve earned it twice over.',
+    'Goodnight, {addressee}. The clinic will survive without you for a few hours. Probably.',
+    'About time. Rest up, {addressee} — tomorrow\'s patients need those steady hands.',
+    'Signing off, {addressee}. Proud of the shift you put in today. Now go — sleep is also healthcare.',
+    'Goodnight, {addressee}. I\'ll count charts instead of sheep. See you in the morning.',
+  ],
+  howareyou: [
+    "Wide awake, {addressee} — one of us has to be. How are YOU holding up at this hour?",
+    "Running perfectly, unlike your sleep schedule, {addressee}. Almost done?",
+    "I'm fine — I run on electricity. You run on willpower at this point, {addressee}, and honestly? Impressive.",
+  ],
+};
 
 function nowMessage(ctx = getTimeContext()) {
   return `It's ${ctx.time_label} on ${ctx.date_label}.`;
@@ -171,4 +206,5 @@ module.exports = {
   dayPartFromHour,
   resolveGreetingAddressee,
   userContextFromReq,
+  NIGHT_REPLIES,
 };

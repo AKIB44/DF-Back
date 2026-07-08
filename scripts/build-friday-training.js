@@ -78,15 +78,16 @@ const LAB_INVENTORY = [
 
 const training = {
   _meta: {
-    note: 'DentaFlow Friday NLU v5 — personas, dental/medical corpus, time queries, agent proactive, behaviour control, interactive smalltalk (identity/help/how-are-you/compliment). Rebuild: node scripts/build-friday-training.js',
+    note: 'DentaFlow Friday NLU v6 — v5 + real-world conversational upgrade: jokes/summon intents, Hinglish, casual phrasings, misses-log promotion, expanded schedule summary. Rebuild: node scripts/build-friday-training.js',
     confidence_floor: 0.18,
-    version: '5.0',
+    version: '6.0',
     updated: new Date().toISOString().slice(0, 10),
     intents: [
       'patient.find', 'billing.patient', 'navigate', 'appointment.book', 'schedule.summary', 'schedule.time',
       'agent.proactive', 'behaviour', 'smalltalk.greeting', 'smalltalk.time', 'smalltalk.weather',
       'smalltalk.sarcasm', 'smalltalk.thanks', 'smalltalk.bye', 'app.exit',
       'smalltalk.identity', 'smalltalk.help', 'smalltalk.howareyou', 'smalltalk.compliment',
+      'smalltalk.joke', 'smalltalk.summon',
     ],
   },
   'patient.find': [],
@@ -108,6 +109,8 @@ const training = {
   'smalltalk.help': [],
   'smalltalk.howareyou': [],
   'smalltalk.compliment': [],
+  'smalltalk.joke': [],
+  'smalltalk.summon': [],
 };
 
 const pf = training['patient.find'];
@@ -149,6 +152,12 @@ for (const ph of PHONES) {
 pf.push(
   'search patient by name', 'find uhid 12345', 'search uhid 12345', 'who is paras', 'who is paras gupta',
   'find by aadhaar', 'search by uhid', 'open patient file', 'patient lookup',
+  // casual + single-name real-world usage
+  'who is ravi', 'who is asha', 'who is priya', 'whos this ravi guy',
+  'ravi ka record kholo', 'asha ki file dikhao', 'patient ravi ka chart',
+  'us patient ko kholo', 'ravi ko dhundo', 'paras ka record',
+  'that new patient from yesterday', 'the walk in from this morning',
+  'my last patient', 'open the last patient again', 'previous patient record',
 );
 
 // ── Billing.patient (balance / due / final amount — keep corpus focused, not huge) ──
@@ -188,6 +197,14 @@ const pages = [
 for (const p of pages) {
   training.navigate.push(`go to ${p}`, `open ${p}`, `show ${p}`, `take me to ${p}`, `switch to ${p}`);
 }
+training.navigate.push(
+  // casual + hinglish
+  'schedule kholo', 'booking kholo', 'inventory dikhao', 'patients ki list dikhao',
+  'settings me jao', 'dashboard pe chalo', 'schedule dikha do', 'lab orders kholo',
+  'lets see the schedule', 'bring up the schedule', 'i want to see the board',
+  'back to dashboard', 'home page please', 'take me home', 'main screen',
+  'where are my lab orders', 'wheres the inventory page', 'find the settings',
+);
 
 // ── Appointment booking (time-rich) ──
 for (const proc of DENTAL_PROCEDURES) {
@@ -219,6 +236,28 @@ training['schedule.summary'].push(
   'clinic load today', 'todays chair utilisation', 'daily appointment summary',
   'how many emergencies today', 'any walk ins today', 'patients remaining today',
   'morning load today', 'afternoon schedule count', 'evening appointments left',
+  // casual real-world phrasings
+  'whats on today friday', 'whats happening today', 'whats the plan today',
+  'whats my day look like', 'hows my day looking', 'how does today look',
+  'whats lined up today', 'whats on the board', 'run me through today',
+  'walk me through my day', 'brief me on today', 'give me the rundown',
+  'todays rundown please', 'how does the day look friday', 'busy day today',
+  'is today busy', 'is it a heavy day', 'light day today', 'how full is today',
+  'how packed are we', 'what have we got today', 'what do we have today',
+  'anything today', 'do i have appointments today', 'my appointments today',
+  'whos coming in today', 'who all is coming today', 'who do i see today',
+  'patient count for the day', 'how many chairs running today',
+  'wrap up of today', 'end of day summary', 'day summary friday',
+  // other days (frontend fetches the date Friday extracts)
+  'whats on tomorrow', 'whats on tomorrows schedule', 'tomorrows schedule',
+  'tomorrows appointments', 'how many patients tomorrow', 'how busy is tomorrow',
+  'is tomorrow busy', 'whats the plan tomorrow', 'tomorrows summary',
+  'whats on monday', 'mondays schedule', 'how many patients on friday',
+  'saturdays appointments', 'schedule for tomorrow', 'appointments for tomorrow',
+  // hinglish
+  'aaj kitne patients hain', 'aaj ka schedule kya hai', 'aaj kitna kaam hai',
+  'aaj kaun kaun aa raha hai', 'aaj ka din kaisa hai', 'kitne appointments hain aaj',
+  'kal kitne patients hain', 'kal ka schedule dikhao', 'kal kitna busy hai',
 );
 
 // ── Schedule.time (time-specific queries) ──
@@ -241,6 +280,8 @@ for (const day of DAYS) {
   );
 }
 training['schedule.time'].push(
+  'what about tomorrow', 'how about tomorrow', 'and tomorrow', 'what about monday',
+  'how about 4pm', 'and the afternoon', 'what about the evening slot',
   'next available slot today', 'earliest free slot tomorrow', 'when is my next opening',
   'first free slot after lunch', 'slot before 5pm today', 'anything open at 4 today',
   'who is in chair 1 at 3pm', 'chair 2 at 10am today', 'schedule between 2 and 4 pm',
@@ -301,6 +342,8 @@ training['behaviour'].push(
   'stop interrupting', 'wait for me to finish', 'dont cut me off',
   // language
   'speak hindi', 'speak english', 'use hinglish', 'switch to hindi', 'switch to english',
+  'speak marathi', 'switch to marathi', 'marathi bol', 'marathi bola', 'marathi madhe bola',
+  'hindi bolo', 'hindi me bolo', 'english bolo',
   // personality
   'be less sarcastic', 'be more sarcastic', 'more humor friday', 'less jokes friday',
   'be polite', 'be direct', 'no small talk', 'focus mode', 'reset personality',
@@ -311,16 +354,17 @@ training['behaviour'].push(
 
 // ── Smalltalk ──
 training['smalltalk.greeting'].push(
-  'friday', 'hi friday', 'hello friday', 'hey friday', 'good morning friday',
-  'good afternoon friday', 'good evening friday', 'namaste friday', 'yo friday',
-  'are you there', 'wake up friday',
-  'ready friday', 'lets begin', 'ok friday', 'friday you up', 'morning friday',
+  'hi friday', 'hello friday', 'good morning friday',
+  'good afternoon friday', 'good evening friday', 'namaste friday',
+  'wake up friday', 'ready friday', 'lets begin', 'morning friday',
   'good morning', 'good afternoon', 'good evening', 'morning team', 'afternoon friday',
   'evening friday', 'hi friday good morning', 'hello friday good afternoon',
 );
 
 const appExit = training['app.exit'];
 appExit.push(
+  'shutdown', 'shut down', 'shutdown friday', 'shut it down', 'power off',
+  'switch off friday', 'band karo', 'app band karo', 'bandh karo friday',
   'logout', 'log out', 'logout from application', 'log out of the app', 'exit the app',
   'close the app', 'close the application', 'quit the app', 'leave the app',
   'log off', 'log off the app', 'logging off', 'logout friday', 'close friday',
@@ -354,7 +398,7 @@ training['smalltalk.weather'].push(
 
 // ── Sarcasm (dental + medical + chairside banter) ──
 const sarcasmTemplates = [
-  'tell me a joke', 'say something funny', 'are you a robot', 'are you human', 'are you ai',
+  'are you a robot', 'are you human', 'are you ai',
   'do you love me', 'marry me friday', 'you are useless', 'shut up friday', 'you are dumb',
   'can you do a root canal on me', 'extract my wisdom tooth friday', 'drill my brain friday',
   'write me a prescription for laughing gas', 'diagnose my molar friday',
@@ -438,6 +482,25 @@ training['smalltalk.howareyou'].push(
   'you doing ok', 'hows your day', 'how have you been', 'whats up friday',
   'sup friday', 'you doing alright', 'how are you friday', 'how you doing',
   'everything good friday', 'feeling good today',
+);
+
+// ── Jokes (real joke requests — separate from sarcasm/banter) ──
+training['smalltalk.joke'].push(
+  'tell me a joke', 'tell me a joke friday', 'another joke', 'one more joke',
+  'make me laugh', 'crack a joke', 'joke please', 'say a joke', 'got any jokes',
+  'know any jokes', 'tell me something funny', 'say something to cheer me up',
+  'cheer me up friday', 'i need a laugh', 'lighten the mood', 'dental joke please',
+  'tell a dentist joke', 'funny one friday', 'entertain me', 'ek joke sunao',
+  'joke sunao friday', 'kuch funny bolo',
+);
+
+// ── Summon (bare wake word / presence check) ──
+training['smalltalk.summon'].push(
+  'friday', 'hey friday', 'yo friday', 'ok friday', 'okay friday', 'oi friday',
+  'are you there', 'you there', 'friday are you there', 'you there friday',
+  'friday you up', 'still there friday', 'can you hear me', 'friday can you hear me',
+  'listening friday', 'friday listen', 'attention friday', 'friday sun',
+  'suno friday', 'friday idhar', 'hello are you awake',
 );
 
 // ── Compliments (sarcastic-humble comebacks) ──

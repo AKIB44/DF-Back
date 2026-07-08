@@ -23,6 +23,7 @@ const {
   workaholicMessage,
   nowMessage,
   detectSaidPeriod,
+  NIGHT_REPLIES,
 } = require('./friday-time');
 const {
   isAppExitUtterance,
@@ -32,6 +33,7 @@ const {
   appExitMessage,
   buildLogoutAction,
 } = require('./friday-app-exit');
+const convo = require('./friday-context');
 
 const TRAINING_FILE = path.join(__dirname, '..', '..', 'data', 'friday-training.json');
 const MISSES_LOG    = path.join(__dirname, '..', '..', 'data', 'friday-misses.log');
@@ -171,10 +173,13 @@ const INLINE_TRAINING = {
 };
 
 // ── Tokenization ────────────────────────────────────────────────────────────
+// NOTE: 'today' / 'now' / 'tomorrow' are deliberately NOT stop words — they are
+// the discriminating tokens for schedule intents ("what's on today" must keep
+// "today" or its vector collapses to nothing).
 const STOP_WORDS = new Set([
   'a','an','the','to','of','for','at','on','in','is','am','are','my','i','we','our',
   'please','could','can','you','me','do','have','has','any','some','this','that','it',
-  'just','really','quickly','fast','now','today','okay','ok','well','hi','hello','hey',
+  'just','really','quickly','fast','okay','ok','well','hi','hello','hey',
 ]);
 
 function tokenize(text) {
@@ -256,6 +261,69 @@ function vectorize(tokens, idf) {
     vec.set(t, (f / tokens.length) * w);
   }
   return vec;
+}
+
+// ── Fuzzy matching — speech recognition mangles words ("shedule", "inventary",
+// "pashent"). For unseen query tokens, map to the closest vocabulary term
+// within a tight edit distance and use it at a small weight penalty.
+function editDistance(a, b, max) {
+  if (Math.abs(a.length - b.length) > max) return max + 1;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      if (cur[j] < rowMin) rowMin = cur[j];
+    }
+    if (rowMin > max) return max + 1; // early exit — row can't recover
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+function nearestVocabTerm(token, idf) {
+  if (token.length < 4) return null;              // too short to fuzz safely
+  const maxDist = token.length >= 7 ? 2 : 1;
+  let best = null, bestDist = maxDist + 1;
+  for (const term of idf.keys()) {
+    if (Math.abs(term.length - token.length) > maxDist) continue;
+    if (term[0] !== token[0]) continue;           // anchor first letter — cheap + accurate for ASR errors
+    const d = editDistance(token, term, maxDist);
+    if (d < bestDist) { bestDist = d; best = term; if (d === 1) break; }
+  }
+  return best;
+}
+
+/** Query-side vectorizer: unseen tokens fall back to their nearest vocab term. */
+function vectorizeQuery(tokens, idf) {
+  const mapped = tokens.map(t => {
+    if (idf.has(t)) return t;
+    return nearestVocabTerm(t, idf) || t;
+  });
+  return vectorize(mapped, idf);
+}
+
+/**
+ * Rewrite an utterance replacing out-of-vocabulary words with their nearest
+ * vocab term ("shedule" → "schedule"). Used to retry entity extraction when
+ * the classifier is confident but the extractor can't parse the raw text.
+ * Never applied by default — it could corrupt unusual patient names.
+ */
+function fuzzyCorrect(text, idf) {
+  return String(text)
+    .toLowerCase()
+    .split(/\s+/)
+    .map(w => {
+      const clean = w.replace(/[^a-z0-9]/g, '');
+      if (!clean || clean.length < 4 || idf.has(clean)) return w;
+      return nearestVocabTerm(clean, idf) || w;
+    })
+    .join(' ');
 }
 
 function cosine(a, b) {
@@ -363,7 +431,7 @@ function extractBillingAspect(text) {
 function extractBillingPatientQuery(text) {
   let work = String(text).replace(/[.?!,]+$/g, '').trim().toLowerCase();
   work = work
-    .replace(/\b(how much does|how much is|how much do|what is|whats|what's|tell me|show me|get me|check|show)\b/g, ' ')
+    .replace(/\b(how much does|how much is|how much do|what does|what do|what is|whats|what's|tell me|show me|get me|check|show)\b/g, ' ')
     .replace(/\b(the|a|an)\b/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
@@ -451,8 +519,15 @@ const NAV_TARGETS = [
   { rx: /\b(labs?|lab orders?|lab work)\b/, target: 'labs' },
   { rx: /\b(treatment plans?)\b/, target: 'treatment-plans' },
   { rx: /\b(prescriptions?|prescription pad|rx|medications?)\b/, target: 'rx' },
-  { rx: /\b(specialty|ortho|orthodontic|implant|implantology|endo|endodontic|paedo|paediatric|tmj)( cases| module)?\b/, target: 'specialty' },
-  { rx: /\b(billing|payments?|invoices?|accounts?)\b/, target: 'accounts' },
+  // Specific specialties first — each has its own case-list page.
+  { rx: /\b(ortho|orthodontics?|braces)( cases| module)?\b/, target: 'specialty-orthodontic' },
+  { rx: /\b(implants?|implantology)( cases| module)?\b/, target: 'specialty-implantology' },
+  { rx: /\b(endo|endodontics?)( cases| module)?\b/, target: 'specialty-endodontic' },
+  { rx: /\b(paedo|paediatrics?|pediatrics?|pedo)( cases| module)?\b/, target: 'specialty-paediatric' },
+  { rx: /\btmj( cases| module)?\b/, target: 'specialty-tmj' },
+  { rx: /\bspecialty( cases| modules?)?\b/, target: 'specialty' },
+  { rx: /\b(billing|payments?|invoices?)\b/, target: 'billing' },
+  { rx: /\baccounts?\b/, target: 'accounts' },
   { rx: /\b(hr|human resources?|staff)\b/, target: 'hr' },
   { rx: /\b(release notes?|changelog)\b/, target: 'release-notes' },
   { rx: /\b(feature flags?|features?)\b/, target: 'feature-flags' },
@@ -462,6 +537,35 @@ function extractNavTarget(text) {
   const t = String(text).toLowerCase();
   for (const m of NAV_TARGETS) if (m.rx.test(t)) return m.target;
   return null;
+}
+
+/**
+ * Parse a clock time out of an utterance. Tolerates the dotted meridiem forms
+ * speech recognition produces ("4 p.m.", "8 a.m") — the old inline regex only
+ * matched bare "pm", silently dropped the meridiem, and booked 8 pm as 08:00.
+ * Word hours ("eight pm") are converted before matching. A bare number only
+ * counts as a time when anchored by "at" / a colon / a meridiem, so "book 2
+ * fillings" doesn't produce a phantom 02:00.
+ */
+function parseClockTime(text) {
+  let s = String(text).toLowerCase()
+    .replace(/([ap])\.?\s?m\b\.?/g, '$1m')     // p.m. / p. m / a.m → pm / am
+    .replace(/\bo'?\s?clock\b/g, '');
+  const hourWords = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12 };
+  for (const [w, n] of Object.entries(hourWords)) s = s.replace(new RegExp(`\\b${w}\\b`, 'g'), String(n));
+  s = s.replace(/\bthirty\b/g, '30').replace(/\bforty\s?5\b/g, '45').replace(/\b15\b(?=\s*(am|pm|$))/g, '15').replace(/\bquarter past\b/g, ':15').replace(/\bhalf past\b/g, ':30');
+
+  const m = s.match(/\b(\d{1,2})(?:[:\s](\d{2}))?\s*(am|pm)\b/)   // meridiem present
+        || s.match(/\bat\s+(\d{1,2})(?::(\d{2}))?\b/)             // "at 4", "at 4:30"
+        || s.match(/\b(\d{1,2}):(\d{2})\b/);                      // "16:30"
+  if (!m) return null;
+  let hh = +m[1]; const mm = m[2] ? +m[2] : 0; const mer = m[3];
+  if (isNaN(hh) || hh > 23 || mm > 59) return null;
+  if (mer === 'pm' && hh < 12) hh += 12;
+  if (mer === 'am' && hh === 12) hh = 0;
+  // Clinic heuristic: an unqualified "at 1"–"at 7" almost always means afternoon/evening.
+  if (!mer && hh >= 1 && hh <= 7) hh += 12;
+  return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
 function extractBookingEntities(text) {
@@ -477,27 +581,47 @@ function extractBookingEntities(text) {
     if (forSplit[1]) out.patient = forSplit[1].replace(/\s+(at|on|tomorrow|today).*$/, '').trim();
   }
 
-  const time = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b|\b(noon|midday|morning|afternoon|evening)\b/);
-  if (time) {
-    if (time[4]) {
-      out.period = time[4];
-    } else {
-      let hh = +time[1]; const mm = time[2] ? +time[2] : 0; const mer = time[3];
-      if (mer === 'pm' && hh < 12) hh += 12;
-      if (mer === 'am' && hh === 12) hh = 0;
-      out.time = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
-    }
+  const clock = parseClockTime(t);
+  if (clock) {
+    out.time = clock;
+  } else {
+    const period = t.match(/\b(noon|midday|morning|afternoon|evening)\b/);
+    if (period) out.period = period[1];
   }
-  if (/\btomorrow\b/.test(t)) {
+  // Possessive forms ("tomorrow's", "monday's") and Hindi kal/aaj included.
+  if (/\btomorrow(?:'?s)?\b|\bkal\b/.test(t)) {
     const d = new Date(); d.setDate(d.getDate() + 1);
     out.date = d.toISOString().slice(0, 10);
-  } else if (/\btoday\b/.test(t)) {
+  } else if (/\btoday(?:'?s)?\b|\baaj\b/.test(t)) {
     out.date = new Date().toISOString().slice(0, 10);
   } else {
-    const wd = t.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/);
+    const wd = t.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:'?s)?\b/);
     if (wd) out.weekday = wd[1];
   }
   return out;
+}
+
+const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+
+/** Next occurrence of a weekday name (today counts as a match). */
+function weekdayToDate(weekday) {
+  const idx = WEEKDAYS.indexOf(String(weekday || '').toLowerCase());
+  if (idx < 0) return null;
+  const d = new Date();
+  d.setDate(d.getDate() + ((idx - d.getDay() + 7) % 7));
+  return d.toISOString().slice(0, 10);
+}
+
+/** Spoken label for a date: "today" / "tomorrow" / "on Friday". */
+function dayLabel(dateIso) {
+  if (!dateIso) return 'today';
+  const now = new Date();
+  const today    = now.toISOString().slice(0, 10);
+  const tomorrow = new Date(now.getTime() + 86400000).toISOString().slice(0, 10);
+  if (dateIso === today) return 'today';
+  if (dateIso === tomorrow) return 'tomorrow';
+  try { return 'on ' + WEEKDAYS[new Date(`${dateIso}T00:00:00`).getDay()][0].toUpperCase() + WEEKDAYS[new Date(`${dateIso}T00:00:00`).getDay()].slice(1); }
+  catch { return `on ${dateIso}`; }
 }
 
 function extractScheduleTimeEntities(text) {
@@ -507,24 +631,22 @@ function extractScheduleTimeEntities(text) {
   const chair = t.match(/\bchair\s*(\d+)\b/);
   if (chair) out.chair = chair[1];
 
-  const clock = t.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/);
+  const clock = parseClockTime(t);
   if (clock) {
-    let hh = +clock[1]; const mm = clock[2] ? +clock[2] : 0; const mer = clock[3];
-    if (mer === 'pm' && hh < 12) hh += 12;
-    if (mer === 'am' && hh === 12) hh = 0;
-    out.time = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+    out.time = clock;
   } else {
     const period = t.match(/\b(morning|afternoon|evening|noon|midday)\b/);
     if (period) out.period = period[1];
   }
 
-  if (/\btomorrow\b/.test(t)) {
+  // Possessive forms ("tomorrow's", "monday's") and Hindi kal/aaj included.
+  if (/\btomorrow(?:'?s)?\b|\bkal\b/.test(t)) {
     const d = new Date(); d.setDate(d.getDate() + 1);
     out.date = d.toISOString().slice(0, 10);
-  } else if (/\btoday\b/.test(t)) {
+  } else if (/\btoday(?:'?s)?\b|\baaj\b/.test(t)) {
     out.date = new Date().toISOString().slice(0, 10);
   } else {
-    const wd = t.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b/);
+    const wd = t.match(/\b(monday|tuesday|wednesday|thursday|friday|saturday|sunday)(?:'?s)?\b/);
     if (wd) out.weekday = wd[1];
   }
   return out;
@@ -545,8 +667,9 @@ const BEHAVIOUR_ACTIONS = [
   { rx: /\bstop\s+listening\b|\bpause\s+listening\b/, action: 'pause_listening' },
   { rx: /\b(start|resume)\s+listening\b/, action: 'resume_listening' },
   { rx: /\bstop\s+interrupting\b|\bdont\s+cut\s+me\s+off\b|\bwait\s+for\s+me\b/, action: 'no_interrupt' },
-  { rx: /\b(speak|talk)\s+hindi\b|\bswitch\s+to\s+hindi\b|\buse\s+hinglish\b/, action: 'language_hindi' },
-  { rx: /\b(speak|talk)\s+english\b|\bswitch\s+to\s+english\b/, action: 'language_english' },
+  { rx: /\b(speak|talk)\s+hindi\b|\bswitch\s+to\s+hindi\b|\buse\s+hinglish\b|\bhindi\s+(bolo?|me[in]?\s+bolo?)\b/, action: 'language_hindi' },
+  { rx: /\b(speak|talk)\s+english\b|\bswitch\s+to\s+english\b|\benglish\s+(bolo?|me[in]?\s+bolo?)\b/, action: 'language_english' },
+  { rx: /\b(speak|talk)\s+marathi\b|\bswitch\s+to\s+marathi\b|\bmarathi\s+(bol|bola|madhe)\b/, action: 'language_marathi' },
   { rx: /\bmore\s+sarcastic\b|\bmore\s+humou?r\b/, action: 'more_sarcasm' },
   { rx: /\b(less\s+sarcastic|less\s+jokes|no\s+small\s+talk)\b/, action: 'less_sarcasm' },
   { rx: /\b(reset|default)\s+(personality|behavio(u)?r|mode)\b|\bnormal\s+mode\b/, action: 'reset' },
@@ -577,24 +700,127 @@ const CONFIDENCE_FLOOR = typeof TRAINING_META.confidence_floor === 'number'
   ? TRAINING_META.confidence_floor
   : 0.18;
 
-// Out-of-domain guard — prevents lab-order / generic tokens from hijacking food/music phrases.
-const OOD_RX = [
-  /\b(pizza|burger|swiggy|zomato|netflix|spotify|youtube|music|playlist|song)\b/,
-  /\border\s+a\s+(pizza|food|meal|cab|ride)\b/,
-  /\bplay\s+(some\s+)?music\b/,
+// Out-of-domain guard — instead of a flat "I didn't understand", Friday now
+// deflects with personality and steers back to work. Each category has its
+// own reply bank so the response actually acknowledges what was asked.
+const OOD_CATEGORIES = [
+  {
+    key: 'food',
+    rx: /\b(pizza|burger|biryani|swiggy|zomato|dominos|coffee|chai|tea|lunch|dinner|snacks?|hungry)\b|\border\s+(a\s+)?(pizza|food|meal)\b/,
+    replies: [
+      "Tempting — but I only order crowns and composites, {addressee}. Your stomach is on its own.",
+      "I can't get you food, but I can clear your schedule fast enough to grab some. Want today's summary?",
+      "Swiggy is out of my scope of practice. Patients, bookings, billing — that's my menu.",
+    ],
+  },
+  {
+    key: 'entertainment',
+    rx: /\b(netflix|spotify|youtube|music|playlist|song|movie|film|series|cricket|match|score|ipl|game)\b|\bplay\s+(some\s+)?music\b/,
+    replies: [
+      "My only playlist is the sound of a fully booked schedule, {addressee}. Try the clinic speakers.",
+      "I don't stream anything except appointment data. Now — anything clinical?",
+      "If it's not on the appointment board, I can't play it. Schedule instead?",
+    ],
+  },
+  {
+    key: 'transport',
+    rx: /\b(uber|ola|cab|taxi|ride|auto\s*rickshaw|train\s+ticket|flight|book\s+a\s+(cab|flight|train))\b/,
+    replies: [
+      "I book chairs, not cabs, {addressee}. Chair 1 is available though.",
+      "The only rides I arrange end in a dental chair. Need a booking?",
+    ],
+  },
+  {
+    key: 'general',
+    rx: /\b(news|stock\s+market|share\s+price|weather\s+in|horoscope|lottery|matka)\b/,
+    replies: [
+      "That's outside my scope of practice — I'm licensed for dentistry, not fortune telling.",
+      "I only forecast schedules, {addressee}. Today's looks busy — want the summary?",
+    ],
+  },
 ];
-function isOutOfDomain(text) {
+
+function outOfDomainCategory(text) {
   const t = String(text).toLowerCase();
-  return OOD_RX.some(rx => rx.test(t));
+  for (const cat of OOD_CATEGORIES) if (cat.rx.test(t)) return cat;
+  return null;
+}
+function isOutOfDomain(text) { return outOfDomainCategory(text) !== null; }
+
+// ── Summon rule — bare wake word ("friday", "hey friday", "you there?") ─────
+const SUMMON_RX = /^(?:hey\s+|oi\s+|yo\s+|ok\s+|okay\s+)?friday[\s?!.]*$|^(?:friday\s+)?(?:are\s+)?you\s+there[\s?!.]*$|^you\s+up\s+friday[\s?!.]*$/i;
+function trySummonRule(raw) {
+  if (!SUMMON_RX.test(String(raw).trim())) return null;
+  return { intent: 'smalltalk.summon', score: 0.95, entities: {} };
+}
+
+// ── Joke rule — an actual joke bank, not a sarcastic dodge ──────────────────
+const JOKE_RX = /\b(tell\s+me\s+a\s+joke|another\s+joke|one\s+more\s+joke|make\s+me\s+laugh|crack\s+a\s+joke|joke\s+please|say\s+a\s+joke|got\s+any\s+jokes?|know\s+any\s+jokes?)\b/i;
+function tryJokeRule(raw) {
+  if (!JOKE_RX.test(String(raw))) return null;
+  return { intent: 'smalltalk.joke', score: 0.95, entities: {} };
+}
+
+// ── "who is <name>" — a person question is a patient lookup unless the name
+// is Friday itself (that's an identity question). Without this rule the
+// identity corpus ("who is friday") pulls single-name queries its way.
+function tryWhoIsRule(raw) {
+  const m = String(raw).trim().replace(/[?.!]+$/, '').match(/^who\s+is\s+(.+)$/i);
+  if (!m) return null;
+  const name = m[1].trim().toLowerCase();
+  if (/^(friday|you|it|she|he|this|that|there)$/.test(name)) return null; // identity/pronoun — let model decide
+  if (/^my\s+next\b/.test(name)) return null;                            // "who is my next patient" → schedule
+  // "who is at 3pm / in chair 1 / next / coming tomorrow" — schedule, not a person.
+  if (/^(at|in|on|next|coming|scheduled|waiting|first|last|free)\b/.test(name)) return null;
+  if (/\b\d{1,2}(:\d{2})?\s*(am|pm)\b|\b(morning|afternoon|evening|noon|today|tomorrow|chair)\b/.test(name)) return null;
+  return { intent: 'patient.find', score: 0.9, entities: {} };
 }
 
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 const REPLIES = {
-  unknown:           "I didn't understand that command.",
+  unknown: [
+    "Hmm — that one's not in my playbook yet, {addressee}. I've logged it so I can learn. Meanwhile: patients, bookings, billing, schedule — I speak those fluently.",
+    "You've officially stumped me. Try a patient name, a page, or ask what's on today.",
+    "I heard you, but couldn't map that to anything useful. Want me to open a patient, check the schedule, or start a booking?",
+    "Not sure what to do with that one, {addressee}. I'm brilliant, but specialised — say something like \"open patient Ravi\" or \"who's at 3pm\".",
+    "That went over my circuits. Give me a patient, a time, or a place in the app and I'm unstoppable.",
+  ],
   empty:             "I didn't catch that.",
   patient_no_name:   "I didn't catch the patient name.",
   billing_no_patient: 'Which patient should I check billing for?',
+  clarify: [
+    "I didn't quite catch that — did you mean “{suggestion}”?",
+    "Not 100% sure, {addressee} — should I {suggestion}?",
+    "Sounded like you want me to {suggestion} — yes or no?",
+  ],
+  clarify_dropped: [
+    "Okay, scratched that. What do you need, {addressee}?",
+    "No problem — dropped it. What's next?",
+    "Fair enough. I'm listening.",
+  ],
+  affirm_nothing: [
+    "Yes to… what exactly, {addressee}? Give me the command again.",
+    "I'll take the enthusiasm, but I've got nothing pending. What do you need?",
+  ],
+  summon: [
+    "Yes, {addressee}?",
+    "Right here. Go ahead.",
+    "Listening, {addressee}.",
+    "At your service — what do you need?",
+    "You rang? I'm all ears. Well, all microphone.",
+  ],
+  jokes: [
+    "What does the dentist of the year get? A little plaque.",
+    "Why did the smartphone go to the dentist? It had Bluetooth problems.",
+    "A patient asked if the extraction would hurt. I said no — the bill does that part.",
+    "What's a dentist's favourite time? Tooth-hurty, {addressee}. I'll see myself out.",
+    "I told a patient to floss daily. He said he does — every day he eats at a restaurant with toothpicks.",
+    "Why do dentists make great detectives? They always get to the root of the problem.",
+    "What did the tooth say to the departing dentist? Fill me in when you get back.",
+    "Dentists hate one thing about vacations: they lose their filling of purpose.",
+    "Why was the toothbrush sad? It got brushed off. Unlike your 3pm patient — they actually showed up.",
+  ],
   greeting: [
     "Yes {addressee}, what do you want me to do?",
     "At your service, {addressee} — what's next?",
@@ -664,8 +890,9 @@ const REPLIES = {
     pause_listening:    'Paused listening.',
     resume_listening:   'Listening again.',
     no_interrupt:       "I'll wait until you finish.",
-    language_hindi:     'Hindi mode noted.',
+    language_hindi:     'Hindi mode noted — thoda hinglish chalega?',
     language_english:   'English mode.',
+    language_marathi:   'Marathi noted — मी प्रयत्न करेन. My Marathi is still in braces, but I understand you.',
     more_sarcasm:       'Oh wonderful — more personality. Noted.',
     less_sarcasm:       'All business from here.',
     reset:              'Back to default settings.',
@@ -736,7 +963,9 @@ function buildIntentResult(raw, best) {
       return { ...base, entities: { query: q }, message: `Searching for ${q}…` };
     }
     case 'navigate': {
-      const target = extractNavTarget(raw);
+      // If the raw text doesn't parse (ASR typo like "shedule"), retry against
+      // a vocabulary-corrected copy before giving up.
+      const target = extractNavTarget(raw) || extractNavTarget(fuzzyCorrect(raw, MODEL.idf));
       if (!target) {
         return { ...base, intent: 'unknown', entities: {}, message: "I'm not sure where to take you." };
       }
@@ -746,11 +975,27 @@ function buildIntentResult(raw, best) {
       const e = extractBookingEntities(raw);
       return { ...base, entities: e, message: 'Starting a new booking.' };
     }
-    case 'schedule.summary':
-      return { ...base, message: "Here's today's summary." };
+    case 'schedule.summary': {
+      // "what's on tomorrow" / "friday's schedule" — carry the date so the
+      // frontend fetches the right day instead of always today.
+      const e    = extractScheduleTimeEntities(raw);
+      const date = e.date || weekdayToDate(e.weekday);
+      const label = dayLabel(date);
+      return {
+        ...base,
+        entities: { ...base.entities, date: date || null, day_label: label },
+        message:  `Here's the summary for ${label}.`,
+      };
+    }
     case 'schedule.time': {
-      const e = extractScheduleTimeEntities(raw);
-      const when = e.time || e.period || e.weekday || 'that time';
+      // Context follow-ups ("what about tomorrow?") arrive with pre-merged
+      // entities — don't clobber them by re-extracting from the fragment.
+      const e = (base.entities.time || base.entities.period || base.entities.date || base.entities.weekday)
+        ? base.entities
+        : extractScheduleTimeEntities(raw);
+      if (!e.date && e.weekday) e.date = weekdayToDate(e.weekday);
+      e.day_label = dayLabel(e.date);
+      const when = [e.time || e.period, e.day_label].filter(Boolean).join(' ') || 'that time';
       return { ...base, entities: e, message: `Checking the schedule for ${when}.` };
     }
     case 'agent.proactive': {
@@ -784,9 +1029,9 @@ function buildIntentResult(raw, best) {
     case 'smalltalk.greeting':
       return { ...base, message: greetingMessage(raw) };
     case 'smalltalk.thanks':
-      return { ...base, message: pick(REPLIES.thanks) };
+      return { ...base, message: pick(getTimeContext().night ? NIGHT_REPLIES.thanks : REPLIES.thanks) };
     case 'smalltalk.bye':
-      return { ...base, message: pick(REPLIES.bye) };
+      return { ...base, message: pick(getTimeContext().night ? NIGHT_REPLIES.bye : REPLIES.bye) };
     case 'smalltalk.time':
       return { ...base, message: nowMessage() };
     case 'smalltalk.weather':
@@ -798,53 +1043,203 @@ function buildIntentResult(raw, best) {
     case 'smalltalk.help':
       return { ...base, message: pick(REPLIES.help) };
     case 'smalltalk.howareyou':
-      return { ...base, message: pick(REPLIES.howareyou) };
+      return { ...base, message: pick(getTimeContext().night ? NIGHT_REPLIES.howareyou : REPLIES.howareyou) };
     case 'smalltalk.compliment':
       return { ...base, message: pick(REPLIES.compliment) };
+    case 'smalltalk.summon':
+      return { ...base, message: pick(REPLIES.summon) };
+    case 'smalltalk.joke':
+      return { ...base, message: pick(REPLIES.jokes) };
     default:
-      return { ...base, intent: 'unknown', message: REPLIES.unknown };
+      return { ...base, intent: 'unknown', message: pick(REPLIES.unknown) };
   }
 }
 
-function classify(transcript) {
+// Confidence band [CLARIFY_FLOOR, CONFIDENCE_FLOOR): instead of failing,
+// Friday asks "did you mean …?" and executes on a yes.
+const CLARIFY_FLOOR = 0.10;
+
+/** Human verb-phrase for a candidate result, used in "did you mean …?". */
+function clarifySuggestionLabel(result) {
+  switch (result.intent) {
+    case 'patient.find':     return result.entities?.query ? `open ${result.entities.query}'s record` : null;
+    case 'navigate':         return result.entities?.target ? `open ${result.entities.target}` : null;
+    case 'appointment.book': return 'start a new booking';
+    case 'schedule.summary': return "read out today's summary";
+    case 'schedule.time':    return 'check the schedule';
+    case 'billing.patient':  return result.entities?.query ? `check billing for ${result.entities.query}` : null;
+    default:                 return null; // don't clarify smalltalk — just answer or pass
+  }
+}
+
+/** Persist whatever this turn taught us for the next one. */
+function rememberTurn(userId, result) {
+  if (!userId) return;
+  const patch = { lastIntent: result.intent, lastEntities: result.entities || {} };
+  const q = result.entities?.query;
+  if ((result.intent === 'patient.find' || result.intent === 'billing.patient') && q) {
+    patch.lastPatientQuery = q;
+  }
+  convo.remember(userId, patch);
+}
+
+function classify(transcript, userId = null) {
   const raw = String(transcript || '').trim();
   if (!raw) {
     return { intent: 'unknown', confidence: 0, entities: {}, message: REPLIES.empty };
   }
 
-  const appExitRule = tryAppExitRule(raw);
-  if (appExitRule) {
-    return attachTimeContext(buildIntentResult(raw, appExitRule), raw);
+  const ctx = convo.recall(userId);
+
+  // ── Pending confirmation ("did you mean …?" → yes / no) ──────────────────
+  if (ctx?.pending) {
+    if (convo.isAffirmation(raw)) {
+      const pending = convo.takePending(userId);
+      const result  = attachTimeContext(pending, raw);
+      rememberTurn(userId, result);
+      return result;
+    }
+    if (convo.isNegation(raw)) {
+      convo.clearPending(userId);
+      return {
+        intent: 'smalltalk.ack', confidence: 1, entities: {},
+        message: pick(REPLIES.clarify_dropped), time_context: getTimeContext(),
+      };
+    }
+    // Anything else: drop the pending question and process the new utterance.
+    convo.clearPending(userId);
+  } else if (convo.isAffirmation(raw)) {
+    // A bare "yes" with nothing pending.
+    return {
+      intent: 'smalltalk.ack', confidence: 1, entities: {},
+      message: pick(REPLIES.affirm_nothing), time_context: getTimeContext(),
+    };
+  } else if (convo.isNegation(raw)) {
+    // A bare "no"/"cancel" with nothing pending — acknowledge and move on
+    // (otherwise "no" leaks into the model and matches "no shows" phrases).
+    return {
+      intent: 'smalltalk.ack', confidence: 1, entities: {},
+      message: pick(REPLIES.clarify_dropped), time_context: getTimeContext(),
+    };
   }
 
-  const accountOutRule = tryAccountSignOutRule(raw);
-  if (accountOutRule) {
-    return attachTimeContext(buildIntentResult(raw, accountOutRule), raw);
+  // ── Out-of-domain: deflect with personality instead of a flat failure ─────
+  const ood = outOfDomainCategory(raw);
+  if (ood) {
+    logMiss(raw, 0, `ood.${ood.key}`);
+    return {
+      intent: 'smalltalk.oob', confidence: 0.9, entities: { category: ood.key },
+      message: pick(ood.replies), time_context: getTimeContext(),
+    };
   }
 
-  const billingRule = tryBillingRule(raw);
+  // ── High-precision rules (raw utterance) ──────────────────────────────────
+  for (const rule of [trySummonRule, tryJokeRule, tryAppExitRule, tryAccountSignOutRule]) {
+    const hit = rule(raw);
+    if (hit) {
+      const result = attachTimeContext(buildIntentResult(raw, hit), raw);
+      rememberTurn(userId, result);
+      return result;
+    }
+  }
+
+  // ── Wake-word prefix + meridiem normalization ─────────────────────────────
+  // Users prefix commands with the wake word ("friday open patient ravi") —
+  // strip it so the command itself drives extraction. Also collapse the dotted
+  // meridiem forms ASR produces ("3 p.m." → "3pm") so tokenization matches the
+  // training corpus instead of shedding single-character fragments.
+  let effective = raw
+    .replace(/^(?:(?:hey|ok|okay|yo|oi)[,\s]+)?friday[,!\s]+(?=\S)/i, '')
+    .replace(/([ap])\.?\s?m\b\.?/gi, '$1m')
+    .replace(/(\d)\s+(am|pm)\b/gi, '$1$2');
+
+  // ── Context carryover ─────────────────────────────────────────────────────
+  // Pronouns → last patient: "what does she owe" → "what does asha owe".
+  if (ctx?.lastPatientQuery && convo.referencesLastPatient(effective)) {
+    effective = convo.resolvePronouns(effective, ctx);
+  }
+
+  // Schedule follow-ups: "what about tomorrow?", "and 4pm?" after a schedule
+  // question — merge new time parts over the previous ones, no reclassification.
+  const tail = convo.followUpTail(raw);
+  if (tail && (ctx?.lastIntent === 'schedule.time' || ctx?.lastIntent === 'schedule.summary')) {
+    const e = extractScheduleTimeEntities(tail);
+    if (e.time || e.period || e.date || e.weekday) {
+      const prev        = ctx.lastEntities || {};
+      const dateChanged = !!(e.date || e.weekday);
+      const timeChanged = !!(e.time || e.period);
+      // "what about tomorrow" keeps the previous time; "and 4pm?" keeps the date.
+      const merged = {
+        time:    e.time    || (dateChanged && !timeChanged ? prev.time    : null),
+        period:  e.period  || (dateChanged && !timeChanged ? prev.period  : null),
+        date:    e.date    || (timeChanged && !dateChanged ? prev.date    : null),
+        weekday: e.weekday || (timeChanged && !dateChanged ? prev.weekday : null),
+        chair:   e.chair   || prev.chair || null,
+      };
+      const result = attachTimeContext(
+        buildIntentResult(raw, { intent: 'schedule.time', score: 0.9, entities: merged }), raw
+      );
+      rememberTurn(userId, result);
+      return result;
+    }
+  }
+
+  const billingRule = tryBillingRule(effective);
   if (billingRule) {
-    return attachTimeContext(buildIntentResult(raw, billingRule), raw);
+    const result = attachTimeContext(buildIntentResult(effective, billingRule), effective);
+    rememberTurn(userId, result);
+    return result;
   }
 
-  const tokens = tokenize(raw);
+  // "who is <name>" — after pronoun resolution so "who is she?" works too.
+  const whoIsRule = tryWhoIsRule(effective);
+  if (whoIsRule) {
+    const result = attachTimeContext(buildIntentResult(effective, whoIsRule), effective);
+    rememberTurn(userId, result);
+    return result;
+  }
+
+  // ── Statistical model (fuzzy query vector tolerates ASR typos) ────────────
+  const tokens = tokenize(effective);
   if (!tokens.length) {
     return { intent: 'unknown', confidence: 0, entities: {}, message: REPLIES.empty };
   }
 
-  const vec = vectorize(tokens, MODEL.idf);
+  const vec = vectorizeQuery(tokens, MODEL.idf);
   let best = { intent: 'unknown', score: 0 };
   for (const intent of MODEL.intents) {
     const score = scoreIntent(vec, intent, MODEL);
     if (score > best.score) best = { intent, score };
   }
 
-  if (best.score < CONFIDENCE_FLOOR || isOutOfDomain(raw)) {
-    logMiss(raw, best.score, best.intent);
-    return { intent: 'unknown', confidence: best.score, entities: {}, message: REPLIES.unknown };
+  if (best.score >= CONFIDENCE_FLOOR) {
+    const result = attachTimeContext(buildIntentResult(effective, best), effective);
+    rememberTurn(userId, result);
+    return result;
   }
 
-  return attachTimeContext(buildIntentResult(raw, best), raw);
+  // ── Borderline: ask instead of failing ────────────────────────────────────
+  if (best.score >= CLARIFY_FLOOR && userId) {
+    const candidate = buildIntentResult(effective, best);
+    const label     = clarifySuggestionLabel(candidate);
+    if (label && candidate.intent !== 'unknown') {
+      convo.setPending(userId, candidate);
+      logMiss(raw, best.score, `clarify.${candidate.intent}`);
+      return {
+        intent:     'clarify',
+        confidence: best.score,
+        entities:   { suggestion: candidate.intent },
+        message:    pick(REPLIES.clarify).replace('{suggestion}', label),
+        time_context: getTimeContext(),
+      };
+    }
+  }
+
+  logMiss(raw, best.score, best.intent);
+  return {
+    intent: 'unknown', confidence: best.score, entities: {},
+    message: pick(REPLIES.unknown), time_context: getTimeContext(),
+  };
 }
 
 module.exports = {

@@ -48,7 +48,7 @@ router.post('/interpret', requirePermission(P.PATIENT_VIEW), async (req, res, ne
     const patientId    = (req.body?.patient_id || req.body?.context?.patient_id || '').toString().trim() || null;
     const refreshToken = (req.body?.refresh_token || '').toString().trim() || null;
 
-    let result = classify(transcript);
+    let result = classify(transcript, req.user.sub);
     if (!result.time_context) {
       result = { ...result, time_context: getTimeContext() };
     }
