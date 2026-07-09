@@ -183,6 +183,7 @@ app.use('/v1/org/accounts',  require('./routes/org-accounts'));
 app.use('/v1/org/roles',     require('./routes/org-roles'));
 app.use('/v1/release-notes', require('./routes/release-notes'));
 app.use('/v1/godview',       require('./godview/godview.routes'));
+app.use('/v1/presence',      require('./godview/presence.routes'));
 app.use('/v1',               require('./routes/inventory'));
 app.use('/v1',               require('./routes/clinical-session'));
 app.use('/v1/specialty',                    require('./routes/specialty'));

@@ -12,6 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 const crypto = require('crypto');
+const db = require('../db');
 const { verifyAccess } = require('../auth/jwt.service');
 
 const SESSION_IDLE_MS   = 15 * 60 * 1000;  // drop a session after 15m of silence
@@ -22,6 +23,33 @@ const GEO_TIMEOUT_MS    = 1500;
 
 /** key `${userId}|${ip}|${uaHash}` → live session */
 const sessions = new Map();
+/** userId → { lat, lng, accuracy, at } — precise browser geolocation (GPS/WiFi) */
+const preciseByUser = new Map();
+const PRECISE_TTL_MS = 15 * 60 * 1000;
+
+/** userId → { name, email, role } — resolved from DB (JWT doesn't carry these). */
+const userCache = new Map();
+const userInFlight = new Set();
+
+/** Fetch a user's display fields once; patch any live sessions when they land. */
+function lookupUser(userId) {
+  if (!userId || userCache.has(userId) || userInFlight.has(userId)) return;
+  userInFlight.add(userId);
+  db.query(
+    `SELECT TRIM(first_name || ' ' || COALESCE(last_name,'')) AS name, email, role
+       FROM users WHERE id = $1`,
+    [userId]
+  ).then(({ rows }) => {
+    const u = rows[0];
+    if (!u) return;
+    const info = { name: (u.name || '').trim() || u.email || 'User', email: u.email || null, role: u.role || null };
+    userCache.set(userId, info);
+    // Backfill sessions created before the lookup resolved.
+    for (const s of sessions.values()) {
+      if (s.userId === userId) { s.name = info.name; s.email = info.email; s.role = info.role; }
+    }
+  }).catch(() => {}).finally(() => userInFlight.delete(userId));
+}
 /** rolling activity feed, newest last */
 const activity = [];
 let activitySeq = 0;
@@ -115,19 +143,29 @@ function record(u, req) {
   const key    = `${u.sub}|${ip}|${uaHash}`;
   const path   = (req.originalUrl || req.url || '').split('?')[0];
   const now    = Date.now();
-  const name   = [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || u.email || 'User';
   const { device } = parseUserAgent(ua);
+
+  // The JWT carries only `sub`; name/email/role are resolved from the DB (cached).
+  const cached = userCache.get(u.sub);
+  const name  = cached?.name
+    || [u.first_name, u.last_name].filter(Boolean).join(' ').trim() || u.email || 'User';
+  const email = cached?.email ?? u.email ?? null;
+  const role  = cached?.role ?? u.role ?? null;
+  if (!cached) lookupUser(u.sub);
 
   let s = sessions.get(key);
   if (!s) {
     s = {
-      key, userId: u.sub, name, email: u.email || null, role: u.role || null,
+      key, userId: u.sub, name, email, role,
       ip, device, userAgent: ua, geo: null,
       firstSeen: now, lastSeen: now, hits: 0, lastPath: path,
     };
     sessions.set(key, s);
     // Resolve geo once per session, asynchronously.
     lookupGeo(ip).then((geo) => { if (geo) s.geo = geo; }).catch(() => {});
+  } else if (cached) {
+    // Keep an existing session's identity fresh once the lookup lands.
+    s.name = name; s.email = email; s.role = role;
   }
   s.lastSeen = now;
   s.lastPath = path;
@@ -147,9 +185,36 @@ function record(u, req) {
   }
 }
 
+/** Record a user's precise browser geolocation (from navigator.geolocation). */
+function recordPrecise(userId, lat, lng, accuracy) {
+  if (!userId || typeof lat !== 'number' || typeof lng !== 'number') return;
+  preciseByUser.set(userId, { lat, lng, accuracy: accuracy || null, at: Date.now() });
+}
+
 function prune() {
   const cutoff = Date.now() - SESSION_IDLE_MS;
   for (const [k, s] of sessions) if (s.lastSeen < cutoff) sessions.delete(k);
+  const pcut = Date.now() - PRECISE_TTL_MS;
+  for (const [uid, p] of preciseByUser) if (p.at < pcut) preciseByUser.delete(uid);
+}
+
+/**
+ * Resolve the geo to show for a session: prefer the user's precise browser
+ * location (exact GPS/WiFi coords) when available and fresh, keeping the
+ * IP-derived city/region/country/ISP labels. Fall back to IP geo otherwise.
+ */
+function resolveGeo(s) {
+  const p = preciseByUser.get(s.userId);
+  if (p && Date.now() - p.at <= PRECISE_TTL_MS) {
+    return {
+      ...(s.geo || {}),                 // keep city/region/country/isp from IP if known
+      lat: p.lat,
+      lon: p.lng,                       // precise coords override the IP ones
+      accuracy: p.accuracy,
+      precise: true,
+    };
+  }
+  return s.geo ? { ...s.geo, precise: false } : null;
 }
 
 /** Live snapshot for the god-view UI. */
@@ -160,7 +225,7 @@ function snapshot() {
     .sort((a, b) => b.lastSeen - a.lastSeen)
     .map((s) => ({
       userId: s.userId, name: s.name, email: s.email, role: s.role,
-      ip: s.ip, device: s.device, geo: s.geo,
+      ip: s.ip, device: s.device, geo: resolveGeo(s),
       firstSeen: s.firstSeen, lastSeen: s.lastSeen, hits: s.hits, lastPath: s.lastPath,
       online: now - s.lastSeen <= ONLINE_MS,
     }));
@@ -193,4 +258,4 @@ function presenceMiddleware(req, res, next) {
   next();
 }
 
-module.exports = { presenceMiddleware, snapshot, parseUserAgent, clientIp, isPrivateIp };
+module.exports = { presenceMiddleware, snapshot, recordPrecise, parseUserAgent, clientIp, isPrivateIp };
