@@ -185,10 +185,56 @@ function record(u, req) {
   }
 }
 
+// Reverse-geocode cache: "lat,lon" (rounded) → { city, region, country }
+const revGeoCache = new Map();
+const revGeoInFlight = new Set();
+
+/**
+ * Turn precise coords into a human place (city/region/country) via OpenStreetMap
+ * Nominatim (free, no key). Cached per ~1km cell. On success it patches the
+ * matching preciseByUser entry so the god view shows the REAL location instead
+ * of the coarse IP city.
+ */
+function reverseGeocode(userId, lat, lng) {
+  const cellKey = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  const cached = revGeoCache.get(cellKey);
+  if (cached) { patchPrecisePlace(userId, cached); return; }
+  if (revGeoInFlight.has(cellKey)) return;
+  revGeoInFlight.add(cellKey);
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), GEO_TIMEOUT_MS);
+  const url = `https://nominatim.openstreetmap.org/reverse?lat=${lat}&lon=${lng}&format=json&zoom=12&addressdetails=1`;
+  fetch(url, { signal: ctrl.signal, headers: { 'User-Agent': 'DentaFlow-GodView/1.0' } })
+    .finally(() => clearTimeout(timer))
+    .then((r) => r.json())
+    .then((j) => {
+      const a = j && j.address ? j.address : {};
+      const place = {
+        city:    a.city || a.town || a.village || a.suburb || a.county || null,
+        region:  a.state || a.region || null,
+        country: a.country || null,
+      };
+      revGeoCache.set(cellKey, place);
+      patchPrecisePlace(userId, place);
+    })
+    .catch(() => {})
+    .finally(() => revGeoInFlight.delete(cellKey));
+}
+
+function patchPrecisePlace(userId, place) {
+  const p = preciseByUser.get(userId);
+  if (p) p.place = place;
+}
+
 /** Record a user's precise browser geolocation (from navigator.geolocation). */
 function recordPrecise(userId, lat, lng, accuracy) {
   if (!userId || typeof lat !== 'number' || typeof lng !== 'number') return;
-  preciseByUser.set(userId, { lat, lng, accuracy: accuracy || null, at: Date.now() });
+  const prev = preciseByUser.get(userId);
+  // Keep a previously-resolved place if the position barely moved.
+  const place = prev && Math.abs(prev.lat - lat) < 0.01 && Math.abs(prev.lng - lng) < 0.01 ? prev.place : undefined;
+  preciseByUser.set(userId, { lat, lng, accuracy: accuracy || null, at: Date.now(), place });
+  if (!place) reverseGeocode(userId, lat, lng);
 }
 
 function prune() {
@@ -199,17 +245,24 @@ function prune() {
 }
 
 /**
- * Resolve the geo to show for a session: prefer the user's precise browser
- * location (exact GPS/WiFi coords) when available and fresh, keeping the
- * IP-derived city/region/country/ISP labels. Fall back to IP geo otherwise.
+ * Resolve the geo to show for a session. When the user's precise browser
+ * location is available, the city/region/country come from REVERSE-GEOCODING
+ * those exact coords (not the IP, which may be a VPN/hosting city) — the ISP is
+ * the only label kept from the IP lookup. Falls back to IP geo otherwise.
  */
 function resolveGeo(s) {
   const p = preciseByUser.get(s.userId);
   if (p && Date.now() - p.at <= PRECISE_TTL_MS) {
+    const place = p.place || {};
     return {
-      ...(s.geo || {}),                 // keep city/region/country/isp from IP if known
+      // Precise place labels win; fall back to IP labels only until reverse
+      // geocode resolves (a second or two after the first report).
+      city:    place.city    ?? s.geo?.city    ?? null,
+      region:  place.region  ?? s.geo?.region  ?? null,
+      country: place.country ?? s.geo?.country ?? null,
+      isp:     s.geo?.isp ?? null,      // ISP only known from the IP lookup
       lat: p.lat,
-      lon: p.lng,                       // precise coords override the IP ones
+      lon: p.lng,
       accuracy: p.accuracy,
       precise: true,
     };
