@@ -1,4 +1,6 @@
 require('dotenv').config();
+// Tee console output into the god-view log buffer as early as possible.
+require('./godview/logcapture').install();
 const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');
@@ -157,6 +159,9 @@ app.use(logger);
 // ── Idempotency — dedupe offline-replayed mutations (keyed on client UUID) ────
 app.use('/v1', require('./middleware/idempotency'));
 
+// ── God view — passive presence capture (IP/device/geo), fire-and-forget ──────
+app.use('/v1', require('./godview/presence.service').presenceMiddleware);
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 app.use('/v1/auth', require('./auth/auth.routes'));
 
@@ -169,6 +174,7 @@ app.use('/v1/staff',         require('./routes/staff'));
 app.use('/v1/patients/:patientId/files', require('./routes/patient-files'));
 app.use('/v1/patients',      require('./routes/patients'));
 app.use('/v1/appointments',  require('./routes/appointments'));
+app.use('/v1/analytics',     require('./routes/analytics'));
 app.use('/v1/rx',            require('./routes/rx'));
 app.use('/v1/rbac',          require('./routes/rbac'));
 app.use('/v1/activity-log',  require('./routes/activity-log'));
@@ -176,6 +182,7 @@ app.use('/v1/org/hr',        require('./routes/org-hr'));
 app.use('/v1/org/accounts',  require('./routes/org-accounts'));
 app.use('/v1/org/roles',     require('./routes/org-roles'));
 app.use('/v1/release-notes', require('./routes/release-notes'));
+app.use('/v1/godview',       require('./godview/godview.routes'));
 app.use('/v1',               require('./routes/inventory'));
 app.use('/v1',               require('./routes/clinical-session'));
 app.use('/v1/specialty',                    require('./routes/specialty'));

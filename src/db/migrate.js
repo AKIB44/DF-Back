@@ -389,6 +389,9 @@ async function isAlreadyApplied(client, file) {
     const { rows } = await client.query("SELECT 1 FROM feature_flags WHERE flag_key = 'gesture_viewer.enabled' LIMIT 1");
     return rows.length > 0;
   }
+  if (file === '084_patient_medical_flags.sql') {
+    return columnExists(client, 'patients', 'is_smoker');
+  }
   return false;
 }
 
