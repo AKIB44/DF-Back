@@ -32,6 +32,18 @@ const bookingSchema = Joi.object({
     gender:           Joi.string().valid('male', 'female', 'other').optional(),
     address:          Joi.string().optional().allow(''),
     clinical_history: Joi.string().optional().allow(''),
+    // Medical flags (migration 084) — captured in the booking intake form.
+    blood_group:              Joi.string().valid('A+','A-','B+','B-','AB+','AB-','O+','O-').optional().allow(null,''),
+    is_smoker:                Joi.boolean().optional(),
+    is_diabetic:              Joi.boolean().optional(),
+    is_hypertensive:          Joi.boolean().optional(),
+    is_pregnant:              Joi.boolean().optional(),
+    is_on_blood_thinner:      Joi.boolean().optional(),
+    known_allergies:          Joi.string().optional().allow(null,''),
+    emergency_contact_name:   Joi.string().optional().allow(null,''),
+    emergency_contact_phone:  Joi.string().optional().allow(null,''),
+    preferred_language:       Joi.string().optional().allow(null,''),
+    occupation:               Joi.string().optional().allow(null,''),
   }).required(),
 });
 
@@ -228,25 +240,53 @@ router.post('/', ...authChain, requirePermission(P.APPOINTMENT_CREATE), validate
     );
     if (existingPat.rows.length) {
       patientId = existingPat.rows[0].id;
-      // Update demographics that were provided at booking time
-      const hasDemo = patient.age != null || patient.gender || patient.address || patient.clinical_history;
+      // Update demographics + medical flags provided at booking time.
+      const hasDemo = patient.age != null || patient.gender || patient.address || patient.clinical_history
+        || patient.blood_group || patient.is_smoker != null || patient.is_diabetic != null
+        || patient.is_hypertensive != null || patient.is_pregnant != null || patient.is_on_blood_thinner != null
+        || patient.known_allergies || patient.emergency_contact_name || patient.emergency_contact_phone
+        || patient.preferred_language || patient.occupation;
       if (hasDemo) {
         await db.query(
           `UPDATE patients SET
-             age              = COALESCE($1, age),
-             gender           = COALESCE($2, gender),
-             address          = COALESCE($3, address),
-             clinical_history = COALESCE($4, clinical_history)
-           WHERE id = $5`,
-          [patient.age ?? null, patient.gender || null, patient.address || null, patient.clinical_history || null, patientId]
+             age                     = COALESCE($1, age),
+             gender                  = COALESCE($2, gender),
+             address                 = COALESCE($3, address),
+             clinical_history        = COALESCE($4, clinical_history),
+             blood_group             = COALESCE($5, blood_group),
+             is_smoker               = COALESCE($6, is_smoker),
+             is_diabetic             = COALESCE($7, is_diabetic),
+             is_hypertensive         = COALESCE($8, is_hypertensive),
+             is_pregnant             = COALESCE($9, is_pregnant),
+             is_on_blood_thinner     = COALESCE($10, is_on_blood_thinner),
+             known_allergies         = COALESCE($11, known_allergies),
+             emergency_contact_name  = COALESCE($12, emergency_contact_name),
+             emergency_contact_phone = COALESCE($13, emergency_contact_phone),
+             preferred_language      = COALESCE($14, preferred_language),
+             occupation              = COALESCE($15, occupation)
+           WHERE id = $16`,
+          [patient.age ?? null, patient.gender || null, patient.address || null, patient.clinical_history || null,
+           patient.blood_group || null, patient.is_smoker ?? null, patient.is_diabetic ?? null,
+           patient.is_hypertensive ?? null, patient.is_pregnant ?? null, patient.is_on_blood_thinner ?? null,
+           patient.known_allergies || null, patient.emergency_contact_name || null, patient.emergency_contact_phone || null,
+           patient.preferred_language || null, patient.occupation || null, patientId]
         );
       }
     } else {
       const newPat = await db.query(
-        `INSERT INTO patients (clinic_id, name, phone, email, age, gender, address, clinical_history)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        `INSERT INTO patients
+           (clinic_id, name, phone, email, age, gender, address, clinical_history,
+            blood_group, is_smoker, is_diabetic, is_hypertensive, is_pregnant,
+            is_on_blood_thinner, known_allergies, emergency_contact_name,
+            emergency_contact_phone, preferred_language, occupation)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+         RETURNING id`,
         [clinicId, patient.name, patient.phone, patient.email || null,
-         patient.age ?? null, patient.gender || null, patient.address || null, patient.clinical_history || null]
+         patient.age ?? null, patient.gender || null, patient.address || null, patient.clinical_history || null,
+         patient.blood_group || null, patient.is_smoker ?? false, patient.is_diabetic ?? false,
+         patient.is_hypertensive ?? false, patient.is_pregnant ?? false, patient.is_on_blood_thinner ?? false,
+         patient.known_allergies || null, patient.emergency_contact_name || null, patient.emergency_contact_phone || null,
+         patient.preferred_language || null, patient.occupation || null]
       );
       patientId = newPat.rows[0].id;
     }
