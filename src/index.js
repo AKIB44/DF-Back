@@ -1,6 +1,7 @@
 require('dotenv').config();
-// Tee console output into the god-view log buffer as early as possible.
-require('./godview/logcapture').install();
+// Wire up the god-view server-log source as early as possible: tail PM2 log
+// files when running under PM2, else capture this process's console output.
+require('./godview/serverlogs').install();
 const express   = require('express');
 const cors      = require('cors');
 const helmet    = require('helmet');

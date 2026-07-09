@@ -7,7 +7,7 @@
 const express      = require('express');
 const authenticate = require('../middleware/authenticate');
 const { snapshot, clientIp } = require('./presence.service');
-const { getLogs } = require('./logcapture');
+const { getLogs, source: logSource } = require('./serverlogs');
 
 const router = express.Router();
 
@@ -36,7 +36,7 @@ router.get('/access', (req, res) => res.json({
 }));
 
 // Live snapshot — sessions (with lat/lon) + activity feed + server logs.
-router.get('/live', (req, res) => res.json({ ...snapshot(), logs: getLogs(150) }));
+router.get('/live', (req, res) => res.json({ ...snapshot(), logs: getLogs(150), logSource: logSource() }));
 
 // Server-Sent Events stream — pushes a fresh snapshot every 3s for real-time UI.
 router.get('/stream', (req, res) => {
