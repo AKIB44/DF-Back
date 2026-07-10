@@ -564,7 +564,7 @@ router.patch(
         );
 
         if (cartItems.length) {
-          const client2 = await db.pool.connect();
+          let client2 = await db.pool.connect();
           try {
             await client2.query('BEGIN');
 
@@ -594,9 +594,6 @@ router.patch(
                   );
                 }
               }
-              await client2.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock`).catch(() =>
-                client2.query(`REFRESH MATERIALIZED VIEW current_stock`)
-              );
             } else if (req.body.status === 'ABANDONED') {
               await client2.query(
                 `UPDATE material_consumption SET state='RETURNED', updated_at=now()
@@ -606,11 +603,19 @@ router.patch(
             }
 
             await client2.query('COMMIT');
+            // Refresh the stock view AFTER commit — REFRESH ... CONCURRENTLY
+            // cannot run inside a transaction (it would abort it and poison the
+            // pooled connection for the next request).
+            await client2.query('REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock')
+              .catch(() => client2.query('REFRESH MATERIALIZED VIEW current_stock'))
+              .catch(() => { /* non-fatal */ });
           } catch (cartErr) {
-            await client2.query('ROLLBACK');
+            try { await client2.query('ROLLBACK'); } catch { /* connection may be unusable */ }
+            client2.release(cartErr);   // destroy on error so a tainted connection isn't reused
+            client2 = null;
             throw cartErr;
           } finally {
-            client2.release();
+            if (client2) client2.release();
           }
         }
       } catch (cartErr) {

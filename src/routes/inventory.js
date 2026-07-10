@@ -12,6 +12,46 @@ const P             = require('../rbac/permissions.constants');
 const router    = express.Router();
 const authChain = [authenticate, tenantScope, auditMw];
 
+/**
+ * Run `fn(client)` inside a transaction. Guarantees the pooled connection is
+ * never returned to the pool in a dirty state: on any error it rolls back and,
+ * if that rollback itself fails, DESTROYS the connection (release(err)) so a
+ * poisoned "current transaction is aborted" connection can't be reused later.
+ */
+async function runTx(fn) {
+  const client = await db.pool.connect();
+  let released = false;
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    let clean = true;
+    try { await client.query('ROLLBACK'); } catch { clean = false; }
+    client.release(clean ? undefined : err); // destroy the connection if it couldn't be cleaned
+    released = true;
+    throw err;
+  } finally {
+    if (!released) client.release();
+  }
+}
+
+/**
+ * Refresh the current_stock materialized view OUTSIDE any transaction.
+ * REFRESH ... CONCURRENTLY cannot run inside a transaction block — doing so
+ * aborts the surrounding transaction. Runs on the pool (auto connection) after
+ * the caller has committed; CONCURRENTLY works because the view has a unique
+ * index, with a plain refresh as a last-resort fallback.
+ */
+async function refreshStock() {
+  try {
+    await db.query('REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock');
+  } catch {
+    try { await db.query('REFRESH MATERIALIZED VIEW current_stock'); } catch { /* non-fatal */ }
+  }
+}
+
 // ── GET /inventory/items?q=&limit= ───────────────────────────────────────────
 // Search inventory items for autocomplete in materials cart
 router.get(
@@ -133,10 +173,7 @@ router.post(
       );
       if (!item.rows[0]) return next(createError(404, 'Item not found'));
 
-      const client = await db.pool.connect();
-      try {
-        await client.query('BEGIN');
-
+      const batch = await runTx(async (client) => {
         const { rows: batchRows } = await client.query(
           `INSERT INTO inventory_batch
              (inventory_item_id, clinic_id, lot_number, expiry_date, initial_quantity, unit, unit_cost, supplier, received_at)
@@ -145,28 +182,20 @@ router.post(
           [itemId, clinicId, lot_number || null, expiry_date || null,
            initial_quantity, unit, req.body.unit_cost ?? null, supplier || null, received_at || null]
         );
-        const batch = batchRows[0];
+        const b = batchRows[0];
 
         await client.query(
           `INSERT INTO stock_movement
              (movement_type, inventory_item_id, batch_id, clinic_id, direction, quantity, source_type, actor_id)
            VALUES ('GOODS_RECEIPT',$1,$2,$3,1,$4,'batch_receive',$5)`,
-          [itemId, batch.id, clinicId, initial_quantity, userId]
+          [itemId, b.id, clinicId, initial_quantity, userId]
         );
+        return b;
+      });
 
-        // Refresh mat view
-        await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock`).catch(() =>
-          client.query(`REFRESH MATERIALIZED VIEW current_stock`)
-        );
-
-        await client.query('COMMIT');
-        return res.status(201).json({ batch });
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
-      }
+      // Refresh the stock view AFTER commit (never inside a transaction).
+      await refreshStock();
+      return res.status(201).json({ batch });
     } catch (err) { next(err); }
   }
 );
@@ -432,10 +461,7 @@ router.post(
       const suffix    = Math.random().toString(36).slice(2, 6).toUpperCase();
       const po_number = `PO-${date}-${suffix}`;
 
-      const client = await db.pool.connect();
-      try {
-        await client.query('BEGIN');
-
+      const result = await runTx(async (client) => {
         const { rows: [po] } = await client.query(
           `INSERT INTO purchase_order (org_id, clinic_id, po_number, supplier, notes, created_by)
            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
@@ -453,15 +479,10 @@ router.post(
           );
           lineRows.push(l);
         }
+        return { ...po, lines: lineRows };
+      });
 
-        await client.query('COMMIT');
-        return res.status(201).json({ purchase_order: { ...po, lines: lineRows } });
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
-      } finally {
-        client.release();
-      }
+      return res.status(201).json({ purchase_order: result });
     } catch (err) { next(err); }
   }
 );
@@ -496,10 +517,7 @@ router.put(
         const { rows: lines } = await db.query(
           `SELECT * FROM purchase_order_line WHERE purchase_order_id = $1`, [po.id]
         );
-        const client = await db.pool.connect();
-        try {
-          await client.query('BEGIN');
-
+        await runTx(async (client) => {
           for (const line of lines) {
             const { rows: [batch] } = await client.query(
               `INSERT INTO inventory_batch
@@ -523,18 +541,10 @@ router.put(
               WHERE id=$1`,
             [po.id]
           );
+        });
 
-          await client.query(`REFRESH MATERIALIZED VIEW CONCURRENTLY current_stock`).catch(() =>
-            client.query(`REFRESH MATERIALIZED VIEW current_stock`)
-          );
-
-          await client.query('COMMIT');
-        } catch (err) {
-          await client.query('ROLLBACK');
-          throw err;
-        } finally {
-          client.release();
-        }
+        // Refresh the stock view AFTER commit (never inside a transaction).
+        await refreshStock();
       } else {
         const newStatus = action === 'send' ? 'sent' : 'cancelled';
         const extra     = action === 'send' ? ', ordered_at = now()' : '';
