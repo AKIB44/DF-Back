@@ -659,12 +659,16 @@ router.patch(
   }
 );
 
-// ── DELETE /services/:id  (cancel — remove a service from the session) ────────
+// ── POST /services/:id/cancel  (cancel — remove a service from the session) ───
 // Distinct from ABANDONED: cancel undoes the add entirely (soft delete), for a
 // service added by mistake or an auto-populated one the doctor doesn't want.
 // Only allowed while the service is still IN_PROGRESS and the session unsealed.
-router.delete(
-  '/services/:id',
+//
+// NOTE: a plain `DELETE /services/:id` collides with the clinic-services catalog
+// router (mounted at /v1/services with its own DELETE /:id), which would shadow
+// this route and return 204. Hence the explicit /cancel action path.
+router.post(
+  '/services/:id/cancel',
   ...authChain,
   requirePermission(P.APPOINTMENT_UPDATE),
   loadResource('service_performed', 'id'),
