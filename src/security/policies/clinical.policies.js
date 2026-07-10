@@ -44,7 +44,10 @@ module.exports = [
     effect: 'PERMIT',
     priority: 60,
     actions: ['create', 'update', 'delete'],
-    resourceTypes: ['examination', 'diagnosis', 'investigation', 'attachment'],
+    // `prescription` is included so clinical staff can write prescriptions in an
+    // open session — without it, create+prescription matched no PERMIT and every
+    // role (org admins included) was denied.
+    resourceTypes: ['examination', 'diagnosis', 'prescription', 'investigation', 'attachment'],
     condition: (ctx) =>
       CLINICAL_ROLES.includes(ctx.subject.role) &&
       ctx.resource.status !== 'COMPLETED' &&

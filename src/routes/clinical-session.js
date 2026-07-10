@@ -172,7 +172,7 @@ router.post(
     try {
       // Fetch appointment and validate it belongs to this clinic
       const { rows: apptRows } = await db.query(
-        `SELECT id, patient_id, status FROM appointments
+        `SELECT id, patient_id, status, service_id FROM appointments
          WHERE id = $1 AND clinic_id = $2`,
         [appointmentId, clinicId]
       );
@@ -216,6 +216,29 @@ router.post(
           doctorId,
           userId,
         });
+
+        // Pre-populate the service that was booked for this appointment so the
+        // doctor starts with it already in the Services Performed list. It's a
+        // normal IN_PROGRESS service — the doctor can add more, or abandon it.
+        if (appt.service_id) {
+          const { rows: svcRows } = await client.query(
+            `SELECT id, price FROM services
+              WHERE id = $1 AND clinic_id = $2 AND is_active = true`,
+            [appt.service_id, clinicId]
+          );
+          const svc = svcRows[0];
+          if (svc) {
+            const basePrice = parseFloat(svc.price) || 0;
+            await client.query(
+              `INSERT INTO service_performed
+                 (org_id, clinic_id, session_id, service_id, tooth_numbers, quantity,
+                  performed_by, base_price, discount_pct, discount_flat, final_charge,
+                  gst_applicable, status, created_by, updated_by)
+               VALUES ($1,$2,$3,$4,'{}',1,$5,$6,0,0,$6,false,'IN_PROGRESS',$7,$7)`,
+              [orgId, clinicId, sess.id, svc.id, doctorId, basePrice, userId]
+            );
+          }
+        }
 
         // Link active specialty cases — create a specialty_visit for each active case
         const { rows: openCases } = await client.query(
@@ -630,6 +653,77 @@ router.patch(
       });
 
       return res.json({ service: updated, plan_item: updatedPlanItem });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── DELETE /services/:id  (cancel — remove a service from the session) ────────
+// Distinct from ABANDONED: cancel undoes the add entirely (soft delete), for a
+// service added by mistake or an auto-populated one the doctor doesn't want.
+// Only allowed while the service is still IN_PROGRESS and the session unsealed.
+router.delete(
+  '/services/:id',
+  ...authChain,
+  requirePermission(P.APPOINTMENT_UPDATE),
+  loadResource('service_performed', 'id'),
+  authorize('update', 'service_performed'),
+  async (req, res, next) => {
+    const { clinicId, userId } = req.context;
+    try {
+      const { rows: spRows } = await db.query(
+        `SELECT sp.*, cs.sealed_at
+           FROM service_performed sp
+           JOIN clinical_session cs ON cs.id = sp.session_id
+          WHERE sp.id = $1 AND sp.clinic_id = $2 AND sp.deleted_at IS NULL`,
+        [req.params.id, clinicId]
+      );
+      if (!spRows.length) return next(createError(404, 'Service not found'));
+      const sp = spRows[0];
+      if (sp.sealed_at) return next(createError(409, 'Session is sealed'));
+      if (sp.status !== 'IN_PROGRESS') {
+        return next(createError(409, 'Only an in-progress service can be cancelled'));
+      }
+
+      let updatedPlanItem = null;
+      await withTx(async (client) => {
+        // Soft-delete the service.
+        await client.query(
+          `UPDATE service_performed
+              SET deleted_at = NOW(), updated_at = NOW(), updated_by = $1
+            WHERE id = $2`,
+          [userId, req.params.id]
+        );
+
+        // Release any materials reserved against it.
+        await client.query(
+          `UPDATE material_consumption SET state='RETURNED', updated_at=now()
+            WHERE service_id=$1 AND state='RESERVED'`,
+          [req.params.id]
+        );
+
+        // Revert the linked plan item back to ACCEPTED so it can be retried.
+        if (sp.plan_item_id) {
+          const { rows: piRows } = await client.query(
+            `UPDATE treatment_plan_item
+                SET status = 'ACCEPTED'::plan_item_status, updated_by = $1
+              WHERE id = $2 AND status = 'IN_PROGRESS' AND deleted_at IS NULL
+              RETURNING *`,
+            [userId, sp.plan_item_id]
+          );
+          if (piRows.length) updatedPlanItem = piRows[0];
+        }
+      });
+
+      req.audit.write({
+        entity_type: 'service_performed',
+        entity_id:   req.params.id,
+        action:      'SERVICE_CANCELLED',
+        details:     { session_id: sp.session_id, service_id: sp.service_id },
+      });
+
+      return res.json({ cancelled: true, id: req.params.id, plan_item: updatedPlanItem });
     } catch (err) {
       next(err);
     }
