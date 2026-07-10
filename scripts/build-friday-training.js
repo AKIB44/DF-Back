@@ -87,10 +87,11 @@ const training = {
       'agent.proactive', 'behaviour', 'smalltalk.greeting', 'smalltalk.time', 'smalltalk.weather',
       'smalltalk.sarcasm', 'smalltalk.thanks', 'smalltalk.bye', 'app.exit',
       'smalltalk.identity', 'smalltalk.help', 'smalltalk.howareyou', 'smalltalk.compliment',
-      'smalltalk.joke', 'smalltalk.summon',
+      'smalltalk.joke', 'smalltalk.summon', 'viewer.open',
     ],
   },
   'patient.find': [],
+  'viewer.open': [],
   'billing.patient': [],
   'app.exit': [],
   'navigate': [],
@@ -501,6 +502,21 @@ training['smalltalk.summon'].push(
   'friday you up', 'still there friday', 'can you hear me', 'friday can you hear me',
   'listening friday', 'friday listen', 'attention friday', 'friday sun',
   'suno friday', 'friday idhar', 'hello are you awake',
+);
+
+// ── 3D gesture viewer (open a patient's 3D scan) ──
+for (const p of ['ravi', 'asha', 'paras', 'priya', 'neha']) {
+  training['viewer.open'].push(
+    `open ${p}'s 3d scan`, `open ${p} 3d scan`, `show ${p}'s 3d model`,
+    `open the 3d viewer for ${p}`, `launch the gesture viewer for ${p}`,
+    `open 3d scan of ${p}`, `view ${p}'s 3d model`, `open ${p} in the 3d viewer`,
+    `show me the 3d scan of ${p}`, `render ${p}'s 3d model`, `load ${p} 3d scan`,
+  );
+}
+training['viewer.open'].push(
+  'open the 3d scan', 'show the 3d model', 'launch the gesture viewer',
+  'open 3d viewer', 'open the gesture viewer', 'view the 3d scan in gesture viewer',
+  'open this patient 3d scan', 'show 3d model in the viewer',
 );
 
 // ── Compliments (sarcastic-humble comebacks) ──

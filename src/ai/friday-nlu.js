@@ -776,6 +776,30 @@ function tryWhoIsRule(raw) {
   return { intent: 'patient.find', score: 0.9, entities: {} };
 }
 
+// ── 3D gesture-viewer rule — "open ravi's 3d scan", "show the 3d model of asha",
+// "launch the gesture viewer for paras", "open 3d scan of ravi sharma" ─────────
+function tryViewerRule(raw) {
+  const t = String(raw).toLowerCase();
+  const isViewer = /\b(3\s?-?\s?d|three\s?d)\b|\bgesture\s+viewer\b/.test(t);
+  const isAction = /\b(open|show|view|launch|pull\s+up|load|display|bring\s+up|render)\b/.test(t);
+  if (!isViewer || !isAction) return null;
+
+  let q = null, m;
+  if ((m = t.match(/\b(?:of|for)\s+(?:patient\s+)?([a-z][a-z\s.]*)$/))) q = m[1];
+  else if ((m = t.match(/\b([a-z][a-z\s.]+?)'?s\s+(?:3\s?-?\s?d|three\s?d|scan|model|gesture)/)))
+    q = m[1].replace(/^(open|show|view|launch|load|display|pull\s+up|the)\s+/, '');
+  else if ((m = t.match(/\b(?:open|show|view|launch|load|display)\s+(?:patient\s+)?([a-z][a-z\s.]+?)\s+(?:in|on)\b/)))
+    q = m[1];
+
+  if (q) {
+    q = cleanPatientQueryTail(
+      q.replace(/\b(3\s?-?\s?d|three\s?d|scan|scans|model|models|viewer|gesture|file|files|the|please)\b/g, ' ')
+       .replace(/\s+/g, ' ').trim()
+    );
+  }
+  return { intent: 'viewer.open', score: 0.92, entities: (q && q.length >= 2) ? { query: q } : {} };
+}
+
 function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
 
 const REPLIES = {
@@ -962,6 +986,13 @@ function buildIntentResult(raw, best) {
       }
       return { ...base, entities: { query: q }, message: `Searching for ${q}…` };
     }
+    case 'viewer.open': {
+      const q = base.entities?.query;
+      if (!q || q.length < 2) {
+        return { ...base, entities: {}, message: "Whose 3D scan should I open in the viewer?" };
+      }
+      return { ...base, entities: { query: q }, message: `Opening ${q}'s 3D scan in the gesture viewer…` };
+    }
     case 'navigate': {
       // If the raw text doesn't parse (ASR typo like "shedule"), retry against
       // a vocabulary-corrected copy before giving up.
@@ -1068,6 +1099,7 @@ function clarifySuggestionLabel(result) {
     case 'schedule.summary': return "read out today's summary";
     case 'schedule.time':    return 'check the schedule';
     case 'billing.patient':  return result.entities?.query ? `check billing for ${result.entities.query}` : null;
+    case 'viewer.open':      return result.entities?.query ? `open ${result.entities.query}'s 3D scan` : null;
     default:                 return null; // don't clarify smalltalk — just answer or pass
   }
 }
@@ -1195,6 +1227,15 @@ function classify(transcript, userId = null) {
   const whoIsRule = tryWhoIsRule(effective);
   if (whoIsRule) {
     const result = attachTimeContext(buildIntentResult(effective, whoIsRule), effective);
+    rememberTurn(userId, result);
+    return result;
+  }
+
+  // "open <name>'s 3D scan in the gesture viewer" — before the model, since the
+  // "open <name>" phrasing would otherwise look like a plain patient lookup.
+  const viewerRule = tryViewerRule(effective);
+  if (viewerRule) {
+    const result = attachTimeContext(buildIntentResult(effective, viewerRule), effective);
     rememberTurn(userId, result);
     return result;
   }
