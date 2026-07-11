@@ -177,7 +177,7 @@ router.get('/:id/record', requirePermission(P.PATIENT_VIEW), async (req, res, ne
            ) AS diagnoses,
            COALESCE(
              (SELECT SUM(sp2.final_charge) FROM service_performed sp2
-               WHERE sp2.session_id = cs.id AND sp2.status <> 'ABANDONED'),
+               WHERE sp2.session_id = cs.id AND sp2.status IN ('COMPLETED', 'PARTIAL')),
              0
            ) AS session_charge
          FROM clinical_session cs
@@ -234,11 +234,13 @@ router.get('/:id/record', requirePermission(P.PATIENT_VIEW), async (req, res, ne
            COALESCE(SUM(sp.final_charge), 0)                  AS total_billed,
            COUNT(sp.id)                                        AS procedure_count
          FROM clinical_session cs
-         -- Exclude abandoned services: they were not performed, so they must
-         -- not contribute to billed totals or the procedure count. Filtering in
-         -- the JOIN keeps sessions with no billable services in session_count.
+         -- Only bill for treatment that was actually performed: COMPLETED (fully
+         -- done) and PARTIAL (partly done). IN_PROGRESS services aren't finished
+         -- yet and ABANDONED ones were never performed, so neither contributes to
+         -- billed totals or the procedure count. Filtering in the JOIN keeps
+         -- sessions with no billable services in session_count.
          LEFT JOIN service_performed sp
-                ON sp.session_id = cs.id AND sp.status <> 'ABANDONED'
+                ON sp.session_id = cs.id AND sp.status IN ('COMPLETED', 'PARTIAL')
          WHERE cs.patient_id = $1 AND cs.clinic_id = $2`,
         [patientId, clinicId]
       ),
