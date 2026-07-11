@@ -233,8 +233,8 @@ router.post(
               `INSERT INTO service_performed
                  (org_id, clinic_id, session_id, service_id, tooth_numbers, quantity,
                   performed_by, base_price, discount_pct, discount_flat, final_charge,
-                  gst_applicable, status, created_by, updated_by)
-               VALUES ($1,$2,$3,$4,'{}',1,$5,$6,0,0,$6,false,'IN_PROGRESS',$7,$7)`,
+                  gst_applicable, status, is_booked_service, created_by, updated_by)
+               VALUES ($1,$2,$3,$4,'{}',1,$5,$6,0,0,$6,false,'IN_PROGRESS',true,$7,$7)`,
               [orgId, clinicId, sess.id, svc.id, doctorId, basePrice, userId]
             );
           }
@@ -686,6 +686,9 @@ router.post(
       if (!spRows.length) return next(createError(404, 'Service not found'));
       const sp = spRows[0];
       if (sp.sealed_at) return next(createError(409, 'Session is sealed'));
+      if (sp.is_booked_service) {
+        return next(createError(409, 'The booked service cannot be removed — abandon it instead.'));
+      }
       if (sp.status !== 'IN_PROGRESS') {
         return next(createError(409, 'Only an in-progress service can be cancelled'));
       }

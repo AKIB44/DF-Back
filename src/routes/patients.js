@@ -97,20 +97,28 @@ router.post('/', requirePermission(P.PATIENT_CREATE), validate(patientSchema), a
       });
     }
 
+    // Family grouping: the first patient on a phone is PRIMARY; anyone added
+    // against a phone that already has a patient becomes SECONDARY.
+    const sibling = await db.query(
+      `SELECT 1 FROM patients WHERE clinic_id = $1 AND phone = $2 LIMIT 1`,
+      [req.user.clinic_id, phone]
+    );
+    const isPrimary = sibling.rows.length === 0;
+
     const result = await db.query(
       `INSERT INTO patients
          (clinic_id, name, phone, email, dob, gender, address, age, clinical_history,
           blood_group, is_smoker, is_diabetic, is_hypertensive, is_pregnant,
           is_on_blood_thinner, known_allergies, emergency_contact_name,
-          emergency_contact_phone, preferred_language, occupation)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+          emergency_contact_phone, preferred_language, occupation, is_primary)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
        RETURNING *`,
       [req.user.clinic_id, name, phone, email || null, dob || null, gender || null,
        address || null, age ?? null, clinical_history || null,
        blood_group || null, is_smoker ?? false, is_diabetic ?? false,
        is_hypertensive ?? false, is_pregnant ?? false, is_on_blood_thinner ?? false,
        known_allergies || null, emergency_contact_name || null,
-       emergency_contact_phone || null, preferred_language || null, occupation || null]
+       emergency_contact_phone || null, preferred_language || null, occupation || null, isPrimary]
     );
     res.status(201).json({ patient: result.rows[0] });
   } catch (err) {
@@ -237,14 +245,25 @@ router.get('/:id/record', requirePermission(P.PATIENT_VIEW), async (req, res, ne
     ]);
 
     if (!patRes.rows.length) return res.status(404).json({ error: 'Patient not found' });
+    const patient = patRes.rows[0];
+
+    // Family group — everyone sharing this phone at the clinic (primary first).
+    const familyRes = await db.query(
+      `SELECT id, name, age, gender, is_primary
+         FROM patients
+        WHERE clinic_id = $1 AND phone = $2
+        ORDER BY is_primary DESC, created_at ASC`,
+      [clinicId, patient.phone]
+    );
 
     res.json({
-      patient:         patRes.rows[0],
+      patient,
       appointments:    apptRes.rows,
       sessions:        sessRes.rows,
       treatment_plans: planRes.rows,
       lab_orders:      labRes.rows,
       billing:         billRes.rows[0],
+      family:          familyRes.rows,
     });
   } catch (err) { next(err); }
 });
@@ -307,6 +326,50 @@ router.put('/:id', requirePermission(P.PATIENT_UPDATE), validate(patientSchema),
     res.json({ patient: result.rows[0] });
   } catch (err) {
     next(err);
+  }
+});
+
+// ── PATCH /:id/primary — make this patient the primary of its phone group ──────
+// Promotes the target to primary and demotes every other patient sharing the
+// phone (the previous primary becomes secondary). Atomic.
+router.patch('/:id/primary', requirePermission(P.PATIENT_UPDATE), async (req, res, next) => {
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `SELECT id, phone FROM patients WHERE id=$1 AND clinic_id=$2`,
+      [req.params.id, req.user.clinic_id]
+    );
+    if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Patient not found' }); }
+    const { phone } = rows[0];
+
+    // Demote all in the group, then promote the target — one primary guaranteed.
+    await client.query(
+      `UPDATE patients SET is_primary = FALSE, updated_at = now()
+         WHERE clinic_id = $1 AND phone = $2 AND id <> $3 AND is_primary = TRUE`,
+      [req.user.clinic_id, phone, req.params.id]
+    );
+    const upd = await client.query(
+      `UPDATE patients SET is_primary = TRUE, updated_at = now()
+         WHERE id = $1 AND clinic_id = $2 RETURNING *`,
+      [req.params.id, req.user.clinic_id]
+    );
+
+    await client.query('COMMIT');
+
+    // Return the refreshed group so the UI can re-render badges.
+    const family = await db.query(
+      `SELECT id, name, age, gender, is_primary FROM patients
+        WHERE clinic_id = $1 AND phone = $2 ORDER BY is_primary DESC, created_at ASC`,
+      [req.user.clinic_id, phone]
+    );
+    res.json({ patient: upd.rows[0], family: family.rows });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
   }
 });
 

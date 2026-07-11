@@ -273,20 +273,27 @@ router.post('/', ...authChain, requirePermission(P.APPOINTMENT_CREATE), validate
         );
       }
     } else {
+      // First patient on a phone = primary; another name on an existing phone
+      // (family member) = secondary.
+      const sib = await db.query(
+        `SELECT 1 FROM patients WHERE clinic_id = $1 AND phone = $2 LIMIT 1`,
+        [clinicId, patient.phone]
+      );
+      const isPrimary = sib.rows.length === 0;
       const newPat = await db.query(
         `INSERT INTO patients
            (clinic_id, name, phone, email, age, gender, address, clinical_history,
             blood_group, is_smoker, is_diabetic, is_hypertensive, is_pregnant,
             is_on_blood_thinner, known_allergies, emergency_contact_name,
-            emergency_contact_phone, preferred_language, occupation)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+            emergency_contact_phone, preferred_language, occupation, is_primary)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
          RETURNING id`,
         [clinicId, patient.name, patient.phone, patient.email || null,
          patient.age ?? null, patient.gender || null, patient.address || null, patient.clinical_history || null,
          patient.blood_group || null, patient.is_smoker ?? false, patient.is_diabetic ?? false,
          patient.is_hypertensive ?? false, patient.is_pregnant ?? false, patient.is_on_blood_thinner ?? false,
          patient.known_allergies || null, patient.emergency_contact_name || null, patient.emergency_contact_phone || null,
-         patient.preferred_language || null, patient.occupation || null]
+         patient.preferred_language || null, patient.occupation || null, isPrimary]
       );
       patientId = newPat.rows[0].id;
     }

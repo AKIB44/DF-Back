@@ -9,6 +9,7 @@ const { requirePermission } = require('../rbac/require-permission.middleware');
 const P            = require('../rbac/permissions.constants');
 const { resolveClinicIdForOptionalAuth } = require('../helpers/public-clinic');
 const { resolvePermissions } = require('../rbac/permission.resolver');
+const { isOrgAdminCached } = require('../auth/auth.helpers');
 
 const router    = express.Router();
 const authChain = [authenticate, tenantScope, auditMw];
@@ -26,6 +27,13 @@ const updateSchema = createSchema;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async function hasPermission(user, clinicId, code) {
+  // Org admins implicitly hold every org permission (except platform.manage) —
+  // mirror requirePermission's bypass so a missing/stale role assignment can't
+  // lock them out of managing their own clinic's services.
+  if (code !== 'platform.manage'
+      && (user.is_org_admin || await isOrgAdminCached(user.sub))) {
+    return true;
+  }
   const perms = await resolvePermissions(user.sub, clinicId);
   return code in perms;
 }

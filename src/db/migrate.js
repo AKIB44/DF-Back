@@ -392,6 +392,12 @@ async function isAlreadyApplied(client, file) {
   if (file === '084_patient_medical_flags.sql') {
     return columnExists(client, 'patients', 'is_smoker');
   }
+  if (file === '085_patient_primary_flag.sql') {
+    return columnExists(client, 'patients', 'is_primary');
+  }
+  if (file === '086_service_performed_booked_flag.sql') {
+    return columnExists(client, 'service_performed', 'is_booked_service');
+  }
   return false;
 }
 
