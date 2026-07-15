@@ -12,9 +12,10 @@ const P               = require('../rbac/permissions.constants');
 const { createError } = require('../helpers/errors');
 const {
   getPresignedPutUrl, getPresignedUrl, deleteObject,
-  buildSessionSummaryPdfKey, uploadBuffer, objectExists, getS3Client,
+  buildSessionSummaryPdfKey, buildInvoicePdfKey, uploadBuffer, objectExists, getS3Client,
 } = require('../services/s3Service');
 const sessionSummaryPdfBuilder = require('../services/sessionSummaryPdfBuilder');
+const invoicePdfBuilder = require('../services/invoicePdfBuilder');
 const { GetObjectCommand } = require('@aws-sdk/client-s3');
 const { loadResource, mapLoadedResource } = require('../security/middleware/load-resource.middleware');
 const { authorize }    = require('../security/middleware/authorize.middleware');
@@ -156,6 +157,90 @@ async function generateSessionSummaryPdf({ sessionId, clinicId }) {
     [sessionId, clinicId, invoiceNo, s3Key]
   );
   return rows[0] || null;
+}
+
+/**
+ * Build a clean, patient-facing INVOICE PDF for a session — the itemised bill of
+ * services performed (gross, discount, final charge) with a payable total. Stored
+ * in S3 and referenced from clinical_session so it can be viewed / sent later.
+ * Returns { invoice_no, invoice_pdf_s3_key, has_items }, or null if the session
+ * doesn't exist.
+ */
+async function generateInvoicePdf({ sessionId, clinicId }) {
+  const { rows: hdrRows } = await db.query(
+    `SELECT cs.id, cs.patient_id, cs.clinic_id, cs.sealed_at, cs.invoice_no,
+            pat.name  AS patient_name, pat.phone AS patient_phone,
+            pat.age   AS patient_age,  pat.gender AS patient_gender,
+            u.first_name AS doctor_first_name, u.last_name AS doctor_last_name,
+            u.designation AS doctor_designation,
+            c.name AS clinic_name, c.phone AS clinic_phone, c.email AS clinic_email,
+            c.address AS clinic_address, c.city AS clinic_city, c.logo_s3_key AS clinic_logo_s3_key
+       FROM clinical_session cs
+       JOIN patients pat ON pat.id = cs.patient_id
+       JOIN users    u   ON u.id   = cs.primary_doctor_id
+       JOIN clinics  c   ON c.id   = cs.clinic_id
+      WHERE cs.id = $1 AND cs.clinic_id = $2`,
+    [sessionId, clinicId]
+  );
+  if (!hdrRows.length) return null;
+  const hdr = hdrRows[0];
+
+  // Only bill for treatment actually performed: COMPLETED (fully done) and PARTIAL
+  // (partly done). IN_PROGRESS and ABANDONED never contribute — same rule as the
+  // patient billing summary.
+  const { rows: svcRows } = await db.query(
+    `SELECT sp.tooth_numbers, sp.quantity, sp.base_price, sp.discount_pct,
+            sp.discount_flat, sp.final_charge, sp.status, s.name AS service_name
+       FROM service_performed sp
+       JOIN services s ON s.id = sp.service_id
+      WHERE sp.session_id = $1 AND sp.deleted_at IS NULL
+        AND sp.status IN ('COMPLETED', 'PARTIAL')
+      ORDER BY sp.started_at ASC`,
+    [sessionId]
+  );
+
+  const items = svcRows.map((sv) => {
+    const qty   = parseInt(sv.quantity, 10) || 1;
+    const gross = (parseFloat(sv.base_price) || 0) * qty;
+    const final = parseFloat(sv.final_charge) || 0;
+    return {
+      service_name:  sv.service_name,
+      tooth_numbers: sv.tooth_numbers,
+      quantity:      qty,
+      gross,
+      discount:      Math.max(0, gross - final),
+      final_charge:  final,
+    };
+  });
+
+  const subtotal       = items.reduce((sum, it) => sum + it.gross, 0);
+  const discount_total = items.reduce((sum, it) => sum + it.discount, 0);
+  const total          = items.reduce((sum, it) => sum + it.final_charge, 0);
+
+  // Reuse the seal-time invoice number when present; otherwise derive a stable one.
+  const invoiceNo = hdr.invoice_no || `INV-${String(sessionId).slice(0, 8).toUpperCase()}`;
+
+  const logoBuffer = hdr.clinic_logo_s3_key
+    ? await _fetchLogoBuffer(hdr.clinic_logo_s3_key, hdr.clinic_id)
+    : null;
+
+  const pdfBuffer = await invoicePdfBuilder.build(
+    { ...hdr, invoice_no: invoiceNo, issued_at: new Date(), items, subtotal, discount_total, total },
+    { logoBuffer }
+  );
+
+  const s3Key = buildInvoicePdfKey({ patientId: hdr.patient_id, sessionId });
+  await uploadBuffer({ key: s3Key, buffer: pdfBuffer, contentType: 'application/pdf', encrypt: true });
+
+  await db.query(
+    `UPDATE clinical_session
+        SET invoice_no = COALESCE(invoice_no, $3),
+            invoice_pdf_s3_key = $4, invoice_pdf_generated_at = now()
+      WHERE id = $1 AND clinic_id = $2`,
+    [sessionId, clinicId, invoiceNo, s3Key]
+  );
+
+  return { invoice_no: invoiceNo, invoice_pdf_s3_key: s3Key, has_items: items.length > 0 };
 }
 
 // ── POST /appointments/:id/start-treatment  (Endpoint 1) ─────────────────────
@@ -958,6 +1043,53 @@ router.get(
         expiresIn: Number(process.env.AWS_S3_SIGNED_URL_TTL_SECONDS || 900),
       });
       return res.json({ url, invoice_no: rows[0]?.invoice_no || null });
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// ── GET /sessions/:id/invoice — presigned URL for the patient-facing invoice ──
+// Generates a clean itemised bill of the services performed. For sealed sessions
+// the stored PDF is reused (charges are final); for in-progress sessions it is
+// regenerated on each view so the bill always reflects the latest charges.
+router.get(
+  '/sessions/:id/invoice',
+  ...authChain,
+  requirePermission(P.BILLING_VIEW),
+  loadResource('session', 'id'),
+  authorize('read', 'session', { mode: 'observe' }),
+  async (req, res, next) => {
+    const { orgId, clinicId } = req.context;
+    const sessionId = req.params.id;
+    try {
+      const session = await sessionRepo.findById({ orgId, clinicId }, sessionId);
+      if (!session) return next(createError(404, 'Session not found'));
+
+      const { rows } = await db.query(
+        `SELECT invoice_pdf_s3_key, invoice_no FROM clinical_session
+          WHERE id = $1 AND clinic_id = $2`,
+        [sessionId, clinicId]
+      );
+      let s3Key    = rows[0]?.invoice_pdf_s3_key;
+      let invoiceNo = rows[0]?.invoice_no || null;
+
+      // Reuse only for sealed sessions with an existing file; otherwise (re)generate.
+      const canReuse = Boolean(s3Key) && Boolean(session.sealed_at) && (await objectExists({ key: s3Key }));
+      if (!canReuse) {
+        const result = await generateInvoicePdf({ sessionId, clinicId });
+        if (!result) return next(createError(404, 'Session not found'));
+        if (!result.has_items)
+          return next(createError(404, 'No billable services on this visit yet.'));
+        s3Key     = result.invoice_pdf_s3_key;
+        invoiceNo = result.invoice_no;
+      }
+
+      const url = await getPresignedUrl({
+        key:       s3Key,
+        expiresIn: Number(process.env.AWS_S3_SIGNED_URL_TTL_SECONDS || 900),
+      });
+      return res.json({ url, invoice_no: invoiceNo });
     } catch (err) {
       next(err);
     }

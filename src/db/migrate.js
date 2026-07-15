@@ -398,6 +398,9 @@ async function isAlreadyApplied(client, file) {
   if (file === '086_service_performed_booked_flag.sql') {
     return columnExists(client, 'service_performed', 'is_booked_service');
   }
+  if (file === '087_session_invoice_pdf.sql') {
+    return columnExists(client, 'clinical_session', 'invoice_pdf_s3_key');
+  }
   return false;
 }
 

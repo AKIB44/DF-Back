@@ -291,6 +291,13 @@ function renderFooter(doc, s) {
 async function build(summary, { logoBuffer } = {}) {
   return new Promise((resolve, reject) => {
     const doc    = new PDFDocument({ size: 'A4', margin: MARGIN, autoFirstPage: true });
+    // The signatures + footer are drawn at absolute positions inside the bottom
+    // margin. PDFKit auto-adds a blank page whenever the text cursor passes
+    // `pageHeight - margins.bottom`, so those writes would spawn extra pages.
+    // Zeroing the bottom margin disables that auto-pagination — real overflow is
+    // still handled explicitly via the PAGE_BREAK_Y checks.
+    doc.page.margins.bottom = 0;
+    doc.on('pageAdded', () => { doc.page.margins.bottom = 0; });
     const chunks = [];
     doc.on('data',  (c) => chunks.push(c));
     doc.on('end',   ()  => resolve(Buffer.concat(chunks)));

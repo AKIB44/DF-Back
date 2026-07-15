@@ -348,12 +348,12 @@ router.patch('/:id/primary', requirePermission(P.PATIENT_UPDATE), async (req, re
 
     // Demote all in the group, then promote the target — one primary guaranteed.
     await client.query(
-      `UPDATE patients SET is_primary = FALSE, updated_at = now()
+      `UPDATE patients SET is_primary = FALSE
          WHERE clinic_id = $1 AND phone = $2 AND id <> $3 AND is_primary = TRUE`,
       [req.user.clinic_id, phone, req.params.id]
     );
     const upd = await client.query(
-      `UPDATE patients SET is_primary = TRUE, updated_at = now()
+      `UPDATE patients SET is_primary = TRUE
          WHERE id = $1 AND clinic_id = $2 RETURNING *`,
       [req.params.id, req.user.clinic_id]
     );

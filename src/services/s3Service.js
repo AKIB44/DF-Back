@@ -139,11 +139,18 @@ function buildSessionSummaryPdfKey({ patientId, sessionId }) {
   return `treatment-summaries/${patientId}/${sessionId}.pdf`;
 }
 
+function buildInvoicePdfKey({ patientId, sessionId }) {
+  if (!patientId) throw new Error('patientId is required for invoice PDF key');
+  if (!sessionId) throw new Error('sessionId is required for invoice PDF key');
+  return `invoices/${patientId}/${sessionId}.pdf`;
+}
+
 function resetClientForTests() {
   cachedClient = undefined;
 }
 
 module.exports = {
+  buildInvoicePdfKey,
   buildPrescriptionPdfKey,
   buildSessionSummaryPdfKey,
   deleteObject,
