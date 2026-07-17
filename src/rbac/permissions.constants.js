@@ -7,6 +7,7 @@ const P = {
   PATIENT_VIEW:       'patient.view',
   PATIENT_CREATE:     'patient.create',
   PATIENT_UPDATE:     'patient.update',
+  PATIENT_DELETE:     'patient.delete',
   PATIENT_MH_VIEW:    'patient.medical_history.view',
 
   PRESCRIPTION_CREATE: 'prescription.create',

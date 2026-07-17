@@ -41,7 +41,7 @@ router.get('/', requirePermission(P.PATIENT_VIEW), async (req, res, next) => {
     const cap = Math.min(Number(limit) || 20, 200);
 
     const params = [req.user.clinic_id];
-    let where = 'p.clinic_id = $1';
+    let where = 'p.clinic_id = $1 AND p.deleted_at IS NULL';
     let idx = 2;
 
     if (search) {
@@ -87,7 +87,8 @@ router.post('/', requirePermission(P.PATIENT_CREATE), validate(patientSchema), a
       `SELECT id FROM patients
          WHERE clinic_id = $1
            AND phone     = $2
-           AND LOWER(TRIM(name)) = LOWER(TRIM($3))`,
+           AND LOWER(TRIM(name)) = LOWER(TRIM($3))
+           AND deleted_at IS NULL`,
       [req.user.clinic_id, phone, name]
     );
     if (dup.rows.length) {
@@ -100,7 +101,7 @@ router.post('/', requirePermission(P.PATIENT_CREATE), validate(patientSchema), a
     // Family grouping: the first patient on a phone is PRIMARY; anyone added
     // against a phone that already has a patient becomes SECONDARY.
     const sibling = await db.query(
-      `SELECT 1 FROM patients WHERE clinic_id = $1 AND phone = $2 LIMIT 1`,
+      `SELECT 1 FROM patients WHERE clinic_id = $1 AND phone = $2 AND deleted_at IS NULL LIMIT 1`,
       [req.user.clinic_id, phone]
     );
     const isPrimary = sibling.rows.length === 0;
@@ -134,7 +135,7 @@ router.get('/:id/record', requirePermission(P.PATIENT_VIEW), async (req, res, ne
 
     const [patRes, apptRes, sessRes, planRes, labRes, billRes] = await Promise.all([
       // patient
-      db.query(`SELECT * FROM patients WHERE id=$1 AND clinic_id=$2`, [patientId, clinicId]),
+      db.query(`SELECT * FROM patients WHERE id=$1 AND clinic_id=$2 AND deleted_at IS NULL`, [patientId, clinicId]),
 
       // appointments
       db.query(
@@ -253,7 +254,7 @@ router.get('/:id/record', requirePermission(P.PATIENT_VIEW), async (req, res, ne
     const familyRes = await db.query(
       `SELECT id, name, age, gender, is_primary
          FROM patients
-        WHERE clinic_id = $1 AND phone = $2
+        WHERE clinic_id = $1 AND phone = $2 AND deleted_at IS NULL
         ORDER BY is_primary DESC, created_at ASC`,
       [clinicId, patient.phone]
     );
@@ -274,7 +275,7 @@ router.get('/:id/record', requirePermission(P.PATIENT_VIEW), async (req, res, ne
 router.get('/:id', requirePermission(P.PATIENT_VIEW), async (req, res, next) => {
   try {
     const patResult = await db.query(
-      `SELECT * FROM patients WHERE id=$1 AND clinic_id=$2`,
+      `SELECT * FROM patients WHERE id=$1 AND clinic_id=$2 AND deleted_at IS NULL`,
       [req.params.id, req.user.clinic_id]
     );
     if (!patResult.rows.length) return res.status(404).json({ error: 'Patient not found' });
@@ -340,7 +341,7 @@ router.patch('/:id/primary', requirePermission(P.PATIENT_UPDATE), async (req, re
     await client.query('BEGIN');
 
     const { rows } = await client.query(
-      `SELECT id, phone FROM patients WHERE id=$1 AND clinic_id=$2`,
+      `SELECT id, phone FROM patients WHERE id=$1 AND clinic_id=$2 AND deleted_at IS NULL`,
       [req.params.id, req.user.clinic_id]
     );
     if (!rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Patient not found' }); }
@@ -349,7 +350,7 @@ router.patch('/:id/primary', requirePermission(P.PATIENT_UPDATE), async (req, re
     // Demote all in the group, then promote the target — one primary guaranteed.
     await client.query(
       `UPDATE patients SET is_primary = FALSE
-         WHERE clinic_id = $1 AND phone = $2 AND id <> $3 AND is_primary = TRUE`,
+         WHERE clinic_id = $1 AND phone = $2 AND id <> $3 AND is_primary = TRUE AND deleted_at IS NULL`,
       [req.user.clinic_id, phone, req.params.id]
     );
     const upd = await client.query(
@@ -363,10 +364,62 @@ router.patch('/:id/primary', requirePermission(P.PATIENT_UPDATE), async (req, re
     // Return the refreshed group so the UI can re-render badges.
     const family = await db.query(
       `SELECT id, name, age, gender, is_primary FROM patients
-        WHERE clinic_id = $1 AND phone = $2 ORDER BY is_primary DESC, created_at ASC`,
+        WHERE clinic_id = $1 AND phone = $2 AND deleted_at IS NULL
+        ORDER BY is_primary DESC, created_at ASC`,
       [req.user.clinic_id, phone]
     );
     res.json({ patient: upd.rows[0], family: family.rows });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    next(err);
+  } finally {
+    client.release();
+  }
+});
+
+// ── DELETE /:id — soft-delete (archive) a patient ─────────────────────────────
+// Stamps deleted_at instead of removing the row, so clinical/billing history is
+// preserved. If the archived patient was the primary of a phone group, the next
+// remaining member is promoted so the family never ends up with no primary.
+router.delete('/:id', requirePermission(P.PATIENT_DELETE), async (req, res, next) => {
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const { rows } = await client.query(
+      `SELECT id, phone, is_primary FROM patients
+        WHERE id=$1 AND clinic_id=$2 AND deleted_at IS NULL`,
+      [req.params.id, req.user.clinic_id]
+    );
+    if (!rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Patient not found' });
+    }
+    const target = rows[0];
+
+    await client.query(
+      `UPDATE patients
+          SET deleted_at = now(), deleted_by = $3, is_primary = FALSE
+        WHERE id=$1 AND clinic_id=$2`,
+      [req.params.id, req.user.clinic_id, req.user.sub]
+    );
+
+    // If we just archived the primary, promote the oldest remaining group member.
+    if (target.is_primary) {
+      await client.query(
+        `UPDATE patients SET is_primary = TRUE
+          WHERE id = (
+            SELECT id FROM patients
+             WHERE clinic_id = $1 AND phone = $2 AND deleted_at IS NULL
+             ORDER BY created_at ASC
+             LIMIT 1
+          )`,
+        [req.user.clinic_id, target.phone]
+      );
+    }
+
+    await client.query('COMMIT');
+    res.json({ ok: true, id: req.params.id });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
     next(err);

@@ -401,6 +401,9 @@ async function isAlreadyApplied(client, file) {
   if (file === '087_session_invoice_pdf.sql') {
     return columnExists(client, 'clinical_session', 'invoice_pdf_s3_key');
   }
+  if (file === '088_patient_soft_delete.sql') {
+    return columnExists(client, 'patients', 'deleted_at');
+  }
   return false;
 }
 
