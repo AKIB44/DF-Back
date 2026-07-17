@@ -6,6 +6,14 @@ const { checkIsOrgAdmin, isOrgAdminCached, getAvailableClinics } = require('./au
 const { issueMfaToken } = require('./mfa.controller');
 const { bumpVersion } = require('../rbac/permission.cache');
 const { sendOtp }     = require('../services/fast2sms');
+const turnstile       = require('../services/turnstile');
+
+/** Best-effort client IP for captcha scoring (respects the proxy chain). */
+function clientIp(req) {
+  const fwd = req.headers['x-forwarded-for'];
+  if (fwd) return String(fwd).split(',')[0].trim();
+  return req.ip || req.socket?.remoteAddress || undefined;
+}
 
 const OTP_TTL_MINUTES    = 10;
 const OTP_MAX_ATTEMPTS   = 5;
@@ -46,6 +54,15 @@ async function assertClinicActive(user, isOrgAdmin) {
 
 async function login(req, res, next) {
   try {
+    // Captcha gate — verified before any DB/password work so bots can't probe
+    // credentials or trip the lockout counter. No-op when Turnstile isn't configured.
+    if (turnstile.isEnabled()) {
+      const ok = await turnstile.verify(req.body.captcha_token, clientIp(req));
+      if (!ok) {
+        return res.status(400).json({ error: 'captcha_failed' });
+      }
+    }
+
     const email    = normalizeEmail(req.body.email ?? req.body.username ?? '');
     const password = String(req.body.password ?? '').trim();
 
@@ -524,4 +541,17 @@ async function verifyOtp(req, res, next) {
   }
 }
 
-module.exports = { login, refresh, logout, me, myPermissions, switchClinic, stepUp, requestOtp, verifyOtp };
+/**
+ * Public auth config for the login page (no auth required). Exposes the Turnstile
+ * SITE key (public by design) so the browser can render the captcha widget.
+ * When captcha is disabled, `captchaEnabled` is false and the site key is null.
+ */
+function authConfig(req, res) {
+  res.json({
+    captchaProvider: 'turnstile',
+    captchaEnabled:  turnstile.isEnabled(),
+    turnstileSiteKey: turnstile.siteKey(),
+  });
+}
+
+module.exports = { login, refresh, logout, me, myPermissions, switchClinic, stepUp, requestOtp, verifyOtp, authConfig };

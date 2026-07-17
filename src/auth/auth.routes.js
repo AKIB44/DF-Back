@@ -11,6 +11,9 @@ const loginSchema = Joi.object({
   email:    Joi.string().trim().email(),
   username: Joi.string().trim().email(),
   password: Joi.string().required(),
+  // Cloudflare Turnstile widget token — optional here so login still validates
+  // when captcha is disabled; the controller enforces it when configured.
+  captcha_token: Joi.string().allow('').optional(),
 }).or('email', 'username');
 
 const otpRequestSchema = Joi.object({
@@ -26,6 +29,7 @@ const otpVerifySchema = Joi.object({
   }),
 });
 
+router.get('/config',         ctrl.authConfig);
 router.post('/login',         validate(loginSchema),      ctrl.login);
 router.post('/refresh',       ctrl.refresh);
 router.post('/logout',        authenticate,               ctrl.logout);
